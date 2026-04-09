@@ -1,49 +1,95 @@
 /**
- * content.js — injected on demand by the popup via chrome.scripting.executeScript.
+ * content.js — injected into every frame (allFrames: true) by the popup.
  *
  * Strategy: chrome.tabCapture stream (full tab) → canvas crop to video element bounds.
  * This captures the exact visual render of the player including custom subtitle overlays.
- * Audio comes from the tab capture stream (not video.captureStream) for full fidelity.
  *
- * Falls back to video.captureStream() if tabCapture stream ID is not provided.
+ * Supports videos inside same-origin iframes (recursive search + iframe-offset-aware
+ * coordinate calculation). For cross-origin iframes, the popup passes in a pre-computed
+ * absoluteRect so canvas crop still works correctly.
  */
 
-// ── State ────────────────────────────────────────────────────────────────────
+// ── State ─────────────────────────────────────────────────────────────────────
 let recorder    = null;
 let chunks      = [];
 let tabStream   = null;
-let recStream   = null;   // canvas + audio stream fed into MediaRecorder
+let recStream   = null;
 let animFrame   = null;
 let tempVid     = null;
 let mimeType    = '';
-let capturedStreamUrls = []; // HLS .m3u8 URLs from interceptor.js
+let capturedStreamUrls = [];
 
-// ── Emeritus CDN map (mirrors interceptor.js for status display) ──────────
+// ── Emeritus CDN map ──────────────────────────────────────────────────────────
 const cdnUrlMap = {
   'video-test.emeritus.org':      'https://cdn1-video-stage.emeritus.org',
   'videocast-stage.emeritus.org': 'https://cdn-vc-stage.emeritus.org',
   'videocast.emeritus.org':       'https://cdn.videocast.emeritus.org',
 };
 
-// Collect M3U8 URLs bubbled up from interceptor.js (MAIN world → ISOLATED world)
 window.addEventListener('__vr_stream__', (e) => {
   const url = e.detail?.url;
   if (url && !capturedStreamUrls.includes(url)) capturedStreamUrls.push(url);
 });
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── Video search ──────────────────────────────────────────────────────────────
+
+/**
+ * Recursively collects all <video> elements in this document and any accessible
+ * (same-origin) nested iframes.
+ */
+function collectVideos(doc) {
+  const vids = Array.from(doc.querySelectorAll('video'));
+  for (const iframe of doc.querySelectorAll('iframe')) {
+    try {
+      if (iframe.contentDocument) vids.push(...collectVideos(iframe.contentDocument));
+    } catch { /* cross-origin — skip */ }
+  }
+  return vids;
+}
+
 function findBestVideo() {
-  const all = Array.from(document.querySelectorAll('video'));
+  const all = collectVideos(document);
   if (!all.length) return null;
+
   const playing = all.filter(v => !v.paused && !v.ended && v.readyState >= 2);
   const pool = playing.length ? playing : all;
+
   return pool.reduce((best, v) => {
-    const r  = v.getBoundingClientRect();
-    const br = best.getBoundingClientRect();
-    return r.width * r.height > br.width * br.height ? v : best;
+    try {
+      const r  = v.getBoundingClientRect();
+      const br = best.getBoundingClientRect();
+      return r.width * r.height > br.width * br.height ? v : best;
+    } catch { return best; }
   });
 }
 
+/**
+ * Returns the video element's bounding rect in top-level window coordinates,
+ * walking up the frame chain for same-origin iframes.
+ */
+function getAbsoluteRect(el) {
+  let rect = { ...el.getBoundingClientRect() };
+  let win  = el.ownerDocument?.defaultView;
+
+  while (win && win !== window.top) {
+    try {
+      const frameEl   = win.frameElement;
+      if (!frameEl) break;
+      const frameRect = frameEl.getBoundingClientRect();
+      rect = {
+        left:   frameRect.left + rect.left,
+        top:    frameRect.top  + rect.top,
+        width:  rect.width,
+        height: rect.height,
+      };
+      win = frameEl.ownerDocument?.defaultView;
+    } catch { break; }
+  }
+
+  return rect;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function pickMimeType() {
   const candidates = [
     'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
@@ -58,10 +104,8 @@ function pickMimeType() {
   }) || 'video/webm';
 }
 
-/** Read active WebVTT/SRT cue text (strips HTML tags). */
 function getSubtitleText(videoEl) {
-  const tracks = Array.from(videoEl.textTracks || []);
-  for (const track of tracks) {
+  for (const track of Array.from(videoEl.textTracks || [])) {
     if (track.mode === 'showing' && track.activeCues?.length) {
       return Array.from(track.activeCues)
         .map(c => (c.text || '').replace(/<[^>]+>/g, '').trim())
@@ -74,9 +118,9 @@ function getSubtitleText(videoEl) {
 
 function saveBlob(blob, ext) {
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
+  const a   = document.createElement('a');
   a.style.display = 'none';
-  a.href = url;
+  a.href     = url;
   a.download = `recording_${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`;
   document.body.appendChild(a);
   a.click();
@@ -87,19 +131,17 @@ function cleanup() {
   if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
   if (tempVid)   { tempVid.srcObject = null; tempVid = null; }
   tabStream?.getTracks().forEach(t => t.stop());
-  tabStream  = null;
-  recStream  = null;
+  tabStream = null;
+  recStream = null;
 }
 
-// ── Core recording ────────────────────────────────────────────────────────────
-
+// ── Tab-capture path (preferred) ──────────────────────────────────────────────
 /**
- * Tab-capture path (preferred):
- *   Uses a streamId from chrome.tabCapture.getMediaStreamId().
- *   Feeds the full-tab video into a canvas, cropped to the video element bounds.
- *   Subtitles rendered by the browser (including custom player overlays) are captured.
+ * @param streamId    — from chrome.tabCapture.getMediaStreamId()
+ * @param videoEl     — the video element
+ * @param fixedRect   — pre-computed absolute rect (used when video is in cross-origin iframe)
  */
-async function startViaTabCapture(streamId, videoEl) {
+async function startViaTabCapture(streamId, videoEl, fixedRect) {
   tabStream = await navigator.mediaDevices.getUserMedia({
     video: {
       mandatory: {
@@ -118,7 +160,6 @@ async function startViaTabCapture(streamId, videoEl) {
     },
   });
 
-  // Hidden video element to render the captured tab stream
   tempVid = document.createElement('video');
   tempVid.srcObject = new MediaStream(tabStream.getVideoTracks());
   tempVid.muted = true;
@@ -128,60 +169,40 @@ async function startViaTabCapture(streamId, videoEl) {
   const tabW = tempVid.videoWidth  || screen.width;
   const tabH = tempVid.videoHeight || screen.height;
 
-  // Canvas sized to the video element's CSS dimensions
-  const initRect = videoEl.getBoundingClientRect();
-  const canvas = document.createElement('canvas');
-  canvas.width  = Math.round(initRect.width)  || 1280;
-  canvas.height = Math.round(initRect.height) || 720;
+  // Use provided rect (cross-origin iframe) or calculate from element position
+  const initRect = fixedRect || getAbsoluteRect(videoEl);
+  const canvas   = document.createElement('canvas');
+  canvas.width   = Math.round(initRect.width)  || 1280;
+  canvas.height  = Math.round(initRect.height) || 720;
   const ctx = canvas.getContext('2d');
 
   function drawFrame() {
-    const rect = videoEl.getBoundingClientRect();
+    // Recalculate each frame in case player moved / resized
+    const rect = fixedRect || getAbsoluteRect(videoEl);
 
-    // Map CSS rect → tab stream pixel space
-    const sx = (rect.left / window.innerWidth)  * tabW;
-    const sy = (rect.top  / window.innerHeight) * tabH;
+    const sx = (rect.left  / window.innerWidth)  * tabW;
+    const sy = (rect.top   / window.innerHeight) * tabH;
     const sw = (rect.width  / window.innerWidth)  * tabW;
     const sh = (rect.height / window.innerHeight) * tabH;
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(tempVid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
 
-    // Overlay WebVTT subtitles (handles <track> elements; custom overlays are
-    // already baked in by the canvas crop from the tab capture)
+    // WebVTT subtitle overlay (custom overlays already baked in via canvas crop)
     const sub = getSubtitleText(videoEl);
-    if (sub) {
-      const fontSize = Math.max(16, Math.round(canvas.height * 0.038));
-      ctx.font = `bold ${fontSize}px 'Arial', sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.lineWidth = Math.max(2, fontSize * 0.12);
-      const y = canvas.height - fontSize * 2.2;
-      sub.split('\n').forEach((line, i) => {
-        const ly = y + i * (fontSize + 5);
-        ctx.strokeStyle = 'rgba(0,0,0,0.9)';
-        ctx.strokeText(line, canvas.width / 2, ly);
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText(line, canvas.width / 2, ly);
-      });
-    }
+    if (sub) drawSubtitle(ctx, canvas, sub);
 
     animFrame = requestAnimationFrame(drawFrame);
   }
 
   drawFrame();
 
-  // Combine canvas stream (video) with tab audio tracks
   recStream = canvas.captureStream(30);
   tabStream.getAudioTracks().forEach(t => recStream.addTrack(t));
-
   return recStream;
 }
 
-/**
- * Fallback path: video.captureStream()
- * Does NOT capture custom player subtitle overlays, but works without tabCapture.
- * WebVTT <track> subtitles are drawn manually via canvas.
- */
+// ── Element captureStream fallback ────────────────────────────────────────────
 async function startViaElementCapture(videoEl) {
   const elemStream = videoEl.captureStream();
   if (!elemStream.getTracks().length) {
@@ -190,9 +211,9 @@ async function startViaElementCapture(videoEl) {
 
   const [videoTrack] = elemStream.getVideoTracks();
   const settings = videoTrack.getSettings();
-  const canvas = document.createElement('canvas');
-  canvas.width  = settings.width  || videoEl.videoWidth  || 1280;
-  canvas.height = settings.height || videoEl.videoHeight || 720;
+  const canvas   = document.createElement('canvas');
+  canvas.width   = settings.width  || videoEl.videoWidth  || 1280;
+  canvas.height  = settings.height || videoEl.videoHeight || 720;
   const ctx = canvas.getContext('2d');
 
   tempVid = document.createElement('video');
@@ -203,20 +224,7 @@ async function startViaElementCapture(videoEl) {
   function drawFrame() {
     ctx.drawImage(tempVid, 0, 0, canvas.width, canvas.height);
     const sub = getSubtitleText(videoEl);
-    if (sub) {
-      const fontSize = Math.max(16, Math.round(canvas.height * 0.038));
-      ctx.font = `bold ${fontSize}px 'Arial', sans-serif`;
-      ctx.textAlign = 'center';
-      ctx.lineWidth = Math.max(2, fontSize * 0.12);
-      const y = canvas.height - fontSize * 2.2;
-      sub.split('\n').forEach((line, i) => {
-        const ly = y + i * (fontSize + 5);
-        ctx.strokeStyle = 'rgba(0,0,0,0.9)';
-        ctx.strokeText(line, canvas.width / 2, ly);
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText(line, canvas.width / 2, ly);
-      });
-    }
+    if (sub) drawSubtitle(ctx, canvas, sub);
     animFrame = requestAnimationFrame(drawFrame);
   }
   drawFrame();
@@ -226,49 +234,57 @@ async function startViaElementCapture(videoEl) {
   return recStream;
 }
 
-async function beginRecording(streamId) {
-  const videoEl = findBestVideo();
-  if (!videoEl) throw new Error('No video element found on this page.');
+function drawSubtitle(ctx, canvas, text) {
+  const fontSize = Math.max(16, Math.round(canvas.height * 0.038));
+  ctx.font      = `bold ${fontSize}px Arial, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.lineWidth = Math.max(2, fontSize * 0.12);
+  const y = canvas.height - fontSize * 2.2;
+  text.split('\n').forEach((line, i) => {
+    const ly = y + i * (fontSize + 5);
+    ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+    ctx.strokeText(line, canvas.width / 2, ly);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(line, canvas.width / 2, ly);
+  });
+}
 
-  let stream;
-  let mode;
+// ── Main recording orchestrator ───────────────────────────────────────────────
+async function beginRecording(streamId, absoluteRect) {
+  const videoEl = findBestVideo();
+  if (!videoEl) throw new Error('No video element found on this page or its iframes.');
+
+  let stream, mode;
 
   if (streamId) {
     try {
-      stream = await startViaTabCapture(streamId, videoEl);
-      mode = 'tab-capture';
+      stream = await startViaTabCapture(streamId, videoEl, absoluteRect || null);
+      mode   = 'tab-capture';
     } catch (e) {
-      console.warn('[VR] Tab capture failed, falling back to captureStream():', e);
+      console.warn('[VR] Tab capture failed, falling back to captureStream():', e.message);
       stream = await startViaElementCapture(videoEl);
-      mode = 'element-capture';
+      mode   = 'element-capture';
     }
   } else {
     stream = await startViaElementCapture(videoEl);
-    mode = 'element-capture';
+    mode   = 'element-capture';
   }
 
   mimeType = pickMimeType();
   chunks   = [];
   recorder = new MediaRecorder(stream, { mimeType });
 
-  recorder.ondataavailable = (e) => {
-    if (e.data?.size > 0) chunks.push(e.data);
-  };
-
+  recorder.ondataavailable = (e) => { if (e.data?.size > 0) chunks.push(e.data); };
   recorder.onstop = () => {
     const isMP4 = mimeType.includes('mp4');
     saveBlob(new Blob(chunks, { type: mimeType }), isMP4 ? 'mp4' : 'webm');
     chunks = [];
     cleanup();
-    // Notify popup that recording stopped (auto-stop on video end)
     chrome.runtime.sendMessage({ event: 'recording-stopped' }).catch(() => {});
   };
 
-  recorder.start(1000); // 1-second chunks for resilience
-
-  // ── Auto-stop when the video finishes playing ────────────────────────────
-  const onEnded = () => stopRecording();
-  videoEl.addEventListener('ended', onEnded, { once: true });
+  recorder.start(1000);
+  videoEl.addEventListener('ended', () => stopRecording(), { once: true });
 
   return { success: true, mimeType, isMP4: mimeType.includes('mp4'), mode };
 }
@@ -278,7 +294,7 @@ function stopRecording() {
     return { success: false, error: 'Not currently recording.' };
   }
   try {
-    recorder.stop(); // triggers onstop → saveBlob → cleanup
+    recorder.stop();
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
@@ -299,10 +315,10 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       break;
     }
     case 'start':
-      beginRecording(msg.streamId)
+      beginRecording(msg.streamId, msg.absoluteRect)
         .then(sendResponse)
         .catch(e => sendResponse({ success: false, error: e.message }));
-      return true; // async
+      return true;
 
     case 'stop':
       sendResponse(stopRecording());
