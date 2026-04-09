@@ -1,29 +1,22 @@
 /**
- * content.js — injected into every frame.
+ * content.js — injected into every frame independently (allFrames: true).
  *
- * Behaviour:
- *   • Finds all <video> elements (including same-origin iframes).
- *   • When a video starts playing → start recording via captureStream().
- *   • When the video ends → stop recording and download the file.
- *   • Works autonomously; popup only reads status.
+ * Each frame manages its own <video> elements.
+ * Popup can trigger recording of a specific video by local index.
  */
 
-let recorder    = null;
-let chunks      = [];
-let mimeType    = '';
+let recorder       = null;
+let chunks         = [];
+let mimeType       = '';
+let recordingIndex = -1;   // local index of the video currently being recorded
 
-// Expose recording flag so popup can read it via executeScript
-window.__vrRecording = false;
+window.__vrRecording      = false;
+window.__vrRecordingIndex = -1;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function collectVideos(doc) {
-  const vids = Array.from(doc.querySelectorAll('video'));
-  for (const f of doc.querySelectorAll('iframe')) {
-    try { if (f.contentDocument) vids.push(...collectVideos(f.contentDocument)); } catch {}
-  }
-  return vids;
-}
+// Only direct videos in THIS frame — each frame manages its own.
+const getVideos = () => Array.from(document.querySelectorAll('video'));
 
 function bestMime() {
   for (const t of ['video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm']) {
@@ -36,72 +29,68 @@ function saveFile() {
   if (!chunks.length) return;
   const blob = new Blob(chunks, { type: mimeType });
   const ext  = mimeType.includes('mp4') ? 'mp4' : 'webm';
-  const name = `recording_${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.${ext}`;
+  const name = `recording_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${ext}`;
   const url  = URL.createObjectURL(blob);
   const a    = Object.assign(document.createElement('a'), { href: url, download: name });
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 5000);
-  chunks   = [];
-  recorder = null;
-  window.__vrRecording = false;
+  chunks                    = [];
+  recorder                  = null;
+  recordingIndex            = -1;
+  window.__vrRecording      = false;
+  window.__vrRecordingIndex = -1;
 }
 
 // ── Recording ─────────────────────────────────────────────────────────────────
 
 function startRecording(video) {
-  if (recorder && recorder.state === 'recording') return; // already recording
+  if (recorder && recorder.state === 'recording') return;
   if (!video.captureStream) return;
 
   try {
-    mimeType = bestMime();
-    chunks   = [];
+    mimeType                  = bestMime();
+    chunks                    = [];
+    recordingIndex            = getVideos().indexOf(video);
+    window.__vrRecording      = true;
+    window.__vrRecordingIndex = recordingIndex;
+
     const stream = video.captureStream();
     recorder = new MediaRecorder(stream, { mimeType });
-    window.__vrRecording = true;
-
     recorder.ondataavailable = e => { if (e.data?.size > 0) chunks.push(e.data); };
     recorder.onstop = saveFile;
     recorder.start(1000);
 
-    // Auto-stop when the video ends
-    video.addEventListener('ended', stopRecording, { once: true });
-    // Also stop if the video is removed from DOM
+    video.addEventListener('ended',   stopRecording, { once: true });
     video.addEventListener('emptied', stopRecording, { once: true });
   } catch (e) {
     console.warn('[VR] Could not start recording:', e.message);
-    recorder = null;
-    window.__vrRecording = false;
+    recorder                  = null;
+    recordingIndex            = -1;
+    window.__vrRecording      = false;
+    window.__vrRecordingIndex = -1;
   }
 }
 
 function stopRecording() {
-  if (recorder && recorder.state === 'recording') {
-    recorder.stop();
-  }
+  if (recorder && recorder.state === 'recording') recorder.stop();
 }
 
-// ── Attach listeners to every video ──────────────────────────────────────────
+// ── Auto-attach play listeners ────────────────────────────────────────────────
 
 function attachListeners() {
-  for (const v of collectVideos(document)) {
+  for (const v of getVideos()) {
     if (v.__vrAttached) continue;
     v.__vrAttached = true;
-
     v.addEventListener('play', () => startRecording(v));
-
-    // Already playing when extension loads (e.g. autoplay pages)
     if (!v.paused && !v.ended && v.readyState >= 2) startRecording(v);
   }
 }
 
 attachListeners();
-
-// Watch for videos added dynamically (SPAs, lazy-loaded players)
 new MutationObserver(attachListeners)
   .observe(document.documentElement, { childList: true, subtree: true });
 
-// Stop triggered from popup button
 window.addEventListener('__vr_stop__', stopRecording);
 
 // ── Popup message handler ─────────────────────────────────────────────────────
@@ -109,13 +98,31 @@ window.addEventListener('__vr_stop__', stopRecording);
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === 'status') {
     sendResponse({
-      videoCount:  collectVideos(document).length,
-      isRecording: recorder?.state === 'recording',
+      videoCount:     getVideos().length,
+      isRecording:    recorder?.state === 'recording',
+      recordingIndex,
     });
+    return true;
   }
+
+  if (msg.action === 'record-video') {
+    const video = getVideos()[msg.localIndex];
+    if (!video) { sendResponse({ success: false, error: 'Video not found' }); return true; }
+
+    // Rewind and play, then record
+    video.currentTime = 0;
+    video.play()
+      .catch(() => {}) // if autoplay blocked, the play listener will still fire
+      .finally(() => startRecording(video));
+    sendResponse({ success: true });
+    return true;
+  }
+
   if (msg.action === 'stop') {
     stopRecording();
     sendResponse({ success: true });
+    return true;
   }
+
   return true;
 });

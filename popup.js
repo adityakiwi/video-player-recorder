@@ -1,90 +1,118 @@
 const listEl  = document.getElementById('videoList');
 const btnStop = document.getElementById('btnStop');
 
+let tabId    = null;
+let videoMap = [];   // [{ frameId, localIndex }] — one entry per detected video
+
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
 }
 
-/** Inject content.js into all frames (no-op if already injected). */
-async function inject(tabId) {
+async function inject(id) {
   try {
     await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
+      target: { tabId: id, allFrames: true },
       files: ['content.js'],
     });
   } catch {}
 }
 
 /**
- * Query every frame for video count + recording state.
- * Returns { videoCount, isRecording }.
+ * Query all frames for their videos.
+ * Returns a flat list: [{ frameId, localIndex, isRecording }]
  */
-async function getStatus(tabId) {
+async function queryVideos(id) {
   let results;
   try {
     results = await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
+      target: { tabId: id, allFrames: true },
       func: () => ({
-        count:      document.querySelectorAll('video').length,
-        recording:  window.__vrRecording || false,
+        count:          document.querySelectorAll('video').length,
+        recording:      window.__vrRecording      || false,
+        recordingIndex: window.__vrRecordingIndex ?? -1,
       }),
     });
-  } catch {
-    return { videoCount: 0, isRecording: false };
+  } catch { return []; }
+
+  const list = [];
+  for (const r of results) {
+    const count    = r.result?.count          || 0;
+    const recIdx   = r.result?.recordingIndex ?? -1;
+    const isRecAny = r.result?.recording      || false;
+    for (let i = 0; i < count; i++) {
+      list.push({
+        frameId:     r.frameId,
+        localIndex:  i,
+        isRecording: isRecAny && recIdx === i,
+      });
+    }
   }
-  const videoCount  = results.reduce((s, r) => s + (r.result?.count     || 0), 0);
-  const isRecording = results.some(r => r.result?.recording);
-  return { videoCount, isRecording };
+  return list;
 }
 
-function render({ videoCount, isRecording }) {
-  if (videoCount === 0) {
+function render(videos) {
+  videoMap = videos;
+
+  if (!videos.length) {
     listEl.innerHTML = '<p class="empty">No videos found on this page.</p>';
     btnStop.style.display = 'none';
     return;
   }
 
-  listEl.innerHTML = Array.from({ length: videoCount }, (_, i) => {
-    const isRec = isRecording && i === 0; // first video shown as recording
-    return `
-      <div class="video-row${isRec ? ' recording' : ''}">
-        <div class="check">${isRec ? '●' : '✓'}</div>
-        <span class="video-label">Video ${i + 1}</span>
-        ${isRec ? '<span class="rec-badge">REC</span>' : ''}
-      </div>`;
-  }).join('');
+  const anyRecording = videos.some(v => v.isRecording);
 
-  btnStop.style.display = isRecording ? 'block' : 'none';
+  listEl.innerHTML = videos.map((v, i) => `
+    <div class="video-row${v.isRecording ? ' recording' : ''}">
+      <div class="check">${v.isRecording ? '●' : '✓'}</div>
+      <span class="video-label">Video ${i + 1}</span>
+      ${v.isRecording
+        ? '<span class="rec-badge">● REC</span>'
+        : `<button class="btn-record" data-gi="${i}">▶ Record</button>`}
+    </div>`
+  ).join('');
+
+  // Wire up per-video record buttons
+  for (const btn of listEl.querySelectorAll('.btn-record')) {
+    btn.addEventListener('click', () => recordVideo(Number(btn.dataset.gi)));
+  }
+
+  btnStop.style.display = anyRecording ? 'block' : 'none';
+}
+
+async function recordVideo(globalIndex) {
+  const entry = videoMap[globalIndex];
+  if (!entry || !tabId) return;
+  try {
+    await chrome.tabs.sendMessage(
+      tabId,
+      { action: 'record-video', localIndex: entry.localIndex },
+      { frameId: entry.frameId }
+    );
+  } catch (e) {
+    console.warn('[VR popup] record-video error:', e.message);
+  }
 }
 
 btnStop.addEventListener('click', async () => {
-  const tab = await getActiveTab();
-  if (!tab?.id) return;
+  if (!tabId) return;
   try {
     await chrome.scripting.executeScript({
-      target: { tabId: tab.id, allFrames: true },
-      func: () => {
-        if (window.__vrRecorder?.state === 'recording') window.__vrRecorder.stop();
-        // Also trigger via custom event content.js listens for
-        window.dispatchEvent(new CustomEvent('__vr_stop__'));
-      },
+      target: { tabId, allFrames: true },
+      func: () => window.dispatchEvent(new CustomEvent('__vr_stop__')),
     });
   } catch {}
 });
 
 async function init() {
   const tab = await getActiveTab();
-  if (!tab?.id) {
-    listEl.innerHTML = '<p class="empty">Cannot access this tab.</p>';
-    return;
-  }
+  if (!tab?.id) { listEl.innerHTML = '<p class="empty">Cannot access this tab.</p>'; return; }
+  tabId = tab.id;
 
-  await inject(tab.id);
-  render(await getStatus(tab.id));
+  await inject(tabId);
+  render(await queryVideos(tabId));
 
-  // Poll every 1.5 s to keep status fresh
-  setInterval(async () => render(await getStatus(tab.id)), 1500);
+  setInterval(async () => render(await queryVideos(tabId)), 1500);
 }
 
 init();
