@@ -69,9 +69,9 @@ jobs:
             5. Click **Load unpacked** → select the unzipped folder
 
             ## What's included
-            - Tab capture + canvas crop → records only the video element, baking in subtitles/overlays
-            - Emeritus CDN HLS stream interception (`interceptor.js`)
-            - Auto-stops when video ends
-            - Saves as MP4 (H.264) or WebM fallback
+            - Detects all videos on the page (including iframes) — shown as Video 1, Video 2 …
+            - Auto-records when a video plays; auto-saves when it ends
+            - Click **▶ Record** next to any video in the popup to record that specific one
+            - Works across frames; saves as MP4 or WebM
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
