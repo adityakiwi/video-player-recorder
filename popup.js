@@ -1,25 +1,20 @@
 // ── DOM refs ──────────────────────────────────────────────────────────────────
-const dot             = document.getElementById('dot');
-const statusText      = document.getElementById('statusText');
-const formatBadge     = document.getElementById('formatBadge');
-const timerEl         = document.getElementById('timer');
-const btnStart        = document.getElementById('btnStart');
-const btnStop         = document.getElementById('btnStop');
-const streamSection   = document.getElementById('streamSection');
-const streamUrlEl     = document.getElementById('streamUrl');
-const msgEl           = document.getElementById('msg');
-const modeRow         = document.getElementById('modeRow');
-const autoToggle      = document.getElementById('autoToggle');
-const autoRow         = document.getElementById('autoRow');
-const autoMoveToggle  = document.getElementById('autoMoveToggle');
-const autoMoveRow     = document.getElementById('autoMoveRow');
+const dot        = document.getElementById('dot');
+const statusText = document.getElementById('statusText');
+const timerEl    = document.getElementById('timer');
+const listEl     = document.getElementById('videoList');
+const btnMove    = document.getElementById('btnMove');
+const btnStop    = document.getElementById('btnStop');
+const msgEl      = document.getElementById('msg');
+const modeRow    = document.getElementById('modeRow');
 
 // ── State ─────────────────────────────────────────────────────────────────────
+let tabId         = null;
+let videoFrameId  = 0;
+let videoEntries  = [];   // [{ frameId, localIndex, globalIndex }]
+let recordMode    = 'video';
 let timerInterval = null;
 let elapsed       = 0;
-let recordMode    = 'video';   // 'video' | 'subtitles'
-let videoFrameId  = 0;         // frameId of the frame that contains the video
-let mimeType      = '';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const pad = n => String(n).padStart(2, '0');
@@ -27,44 +22,37 @@ function fmtTime(s) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   return h ? `${pad(h)}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
 }
-function setMsg(text, type = '') {
-  msgEl.textContent = text;
-  msgEl.className   = 'msg' + (type ? ` ${type}` : '');
-}
 function startTimer() {
-  elapsed = 0; timerEl.textContent = '00:00'; timerEl.className = 'timer active';
+  elapsed = 0; timerEl.textContent = '00:00'; timerEl.style.display = 'inline';
   timerInterval = setInterval(() => { timerEl.textContent = fmtTime(++elapsed); }, 1000);
 }
 function stopTimer() {
-  clearInterval(timerInterval); timerInterval = null;
-  timerEl.textContent = '00:00'; timerEl.className = 'timer';
+  clearInterval(timerInterval); timerInterval = null; timerEl.style.display = 'none'; elapsed = 0;
 }
-
+function setMsg(t, type = '') {
+  msgEl.textContent = t; msgEl.className = 'msg' + (type ? ` ${type}` : '');
+}
 async function getActiveTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   return tab;
 }
-
-// ── Inject + detect ───────────────────────────────────────────────────────────
-
-/** Inject content.js into every frame of the tab. */
-async function injectAll(tabId) {
-  try {
-    await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['content.js'] });
-  } catch { /* restricted page or already injected */ }
+async function injectAll(id) {
+  try { await chrome.scripting.executeScript({ target: { tabId: id, allFrames: true }, files: ['content.js'] }); } catch {}
+}
+function sendToFrame(tid, fid, payload) {
+  return new Promise(resolve => {
+    chrome.tabs.sendMessage(tid, payload, { frameId: fid }, resp => {
+      resolve(chrome.runtime.lastError ? null : resp);
+    });
+  });
 }
 
-/**
- * Find which frame has a video element.
- * Returns { hasVideo, frameId }.
- * Prefers the top frame (frameId 0) if it has a video; otherwise picks the
- * first sub-frame that has one.
- */
-async function detectVideoFrame(tabId) {
+// ── Scan all frames for videos ────────────────────────────────────────────────
+async function scanVideos(tid) {
   let results;
   try {
     results = await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
+      target: { tabId: tid, allFrames: true },
       func: () => {
         function collectVids(doc) {
           const v = Array.from(doc.querySelectorAll('video'));
@@ -73,71 +61,24 @@ async function detectVideoFrame(tabId) {
           }
           return v;
         }
-        const vids = collectVids(document);
-        return { hasVideo: vids.length > 0, videoCount: vids.length, isTop: window.self === window.top };
+        return { count: collectVids(document).length };
       },
     });
-  } catch {
-    return { hasVideo: false, videoCount: 0, frameId: 0 };
+  } catch { return []; }
+
+  const entries = [];
+  let gi = 0, bestCount = 0;
+  for (const r of results) {
+    const count = r.result?.count || 0;
+    if (count > bestCount) { bestCount = count; videoFrameId = r.frameId; }
+    for (let i = 0; i < count; i++) {
+      entries.push({ frameId: r.frameId, localIndex: i, globalIndex: gi++ });
+    }
   }
-
-  const withVideo = results.filter(r => r.result?.hasVideo);
-  if (!withVideo.length) return { hasVideo: false, videoCount: 0, frameId: 0 };
-
-  // Pick the frame with the most videos; ties go to the top frame
-  const chosen = withVideo.reduce((best, r) =>
-    r.result.videoCount > best.result.videoCount ? r : best
-  );
-  const totalVideoCount = results.reduce((sum, r) => sum + (r.result?.videoCount || 0), 0);
-  return { hasVideo: true, videoCount: totalVideoCount, frameId: chosen.frameId ?? 0 };
+  return entries;
 }
 
-/** Send a message to a specific frame and await its response. */
-function sendToFrame(tabId, frameId, payload) {
-  return new Promise(resolve => {
-    chrome.tabs.sendMessage(tabId, payload, { frameId }, resp => {
-      resolve(chrome.runtime.lastError ? null : resp);
-    });
-  });
-}
-
-// ── UI state ──────────────────────────────────────────────────────────────────
-function showIdle(hasVideo) {
-  dot.className = hasVideo ? 'dot ok' : 'dot warn';
-  statusText.textContent = hasVideo ? 'Video player detected' : 'No video found on page';
-  formatBadge.style.display = 'none';
-  // Hide manual start/stop when auto mode is on
-  btnStart.style.display = autoToggle.checked ? 'none' : 'block';
-  btnStart.disabled      = !hasVideo;
-  btnStop.style.display  = 'none'; btnStop.disabled = false;
-  modeRow.style.display  = 'flex';
-  stopTimer();
-  setMsg(hasVideo
-    ? (autoToggle.checked ? 'Watching\u2026 will record when video plays.' : '')
-    : 'Navigate to a page with an HTML5 video player.');
-}
-
-function showRecording(fmt) {
-  if (fmt) mimeType = fmt;
-  dot.className = 'dot rec';
-  statusText.textContent = 'Recording\u2026';
-  const label = fmt || mimeType || 'WebM';
-  formatBadge.textContent = label; formatBadge.style.display = 'inline';
-  btnStart.style.display = 'none';
-  // In auto mode, keep stop button visible so user can force-stop
-  btnStop.style.display  = 'block'; btnStop.disabled = false;
-  modeRow.style.display  = 'none';
-  startTimer();
-  setMsg(label + ' \u00B7 ' + (recordMode === 'subtitles' ? 'Video + Subtitles' : 'Video only'));
-}
-
-function showStreamUrl(urls) {
-  if (!urls?.length) { streamSection.classList.remove('visible'); return; }
-  streamSection.classList.add('visible');
-  streamUrlEl.textContent = urls[urls.length - 1];
-}
-
-// ── Mode toggle ───────────────────────────────────────────────────────────────
+// ── Mode pills ────────────────────────────────────────────────────────────────
 modeRow.addEventListener('click', e => {
   const pill = e.target.closest('.mode-pill');
   if (!pill) return;
@@ -145,180 +86,165 @@ modeRow.addEventListener('click', e => {
   modeRow.querySelectorAll('.mode-pill').forEach(p => p.classList.toggle('active', p === pill));
 });
 
-// ── Copy HLS URL ──────────────────────────────────────────────────────────────
-streamUrlEl.addEventListener('click', () => {
-  const url = streamUrlEl.textContent;
-  if (!url) return;
-  navigator.clipboard.writeText(url).then(() => {
-    const orig = streamUrlEl.textContent;
-    streamUrlEl.textContent = 'Copied!';
-    setTimeout(() => { streamUrlEl.textContent = orig; }, 1200);
-  });
-});
+// ── Per-video Auto Play ───────────────────────────────────────────────────────
+async function toggleAutoPlay(gi, btn) {
+  const entry = videoEntries[gi];
+  if (!entry) return;
 
-// ── Auto Play toggle ──────────────────────────────────────────────────────────
-autoToggle.addEventListener('change', async () => {
-  const tab = await getActiveTab();
-  if (!tab?.id) return;
+  const isOn = btn.classList.contains('active');
+  if (isOn) {
+    await sendToFrame(tabId, entry.frameId, { action: 'disable-auto' });
+    btn.textContent = '▶ Auto Play';
+    btn.classList.remove('active');
+    btn.closest('.video-row').classList.remove('auto-active');
+    setMsg('');
+  } else {
+    // Disable any existing modes
+    await sendToFrame(tabId, videoFrameId, { action: 'disable-auto' });
+    await sendToFrame(tabId, videoFrameId, { action: 'disable-auto-move' });
+    listEl.querySelectorAll('.btn-auto').forEach(b => {
+      b.textContent = '▶ Auto Play'; b.classList.remove('active');
+      b.closest('.video-row').classList.remove('auto-active');
+    });
+    btnMove.classList.remove('active');
+    btnMove.textContent = '⟳ Auto Move — Record all in sequence';
 
-  await injectAll(tab.id);
-  const detection = await detectVideoFrame(tab.id);
-  videoFrameId = detection.frameId;
-
-  if (autoToggle.checked) {
-    // Disable Auto Move if active
-    if (autoMoveToggle.checked) {
-      autoMoveToggle.checked = false;
-      await sendToFrame(tab.id, videoFrameId, { action: 'disable-auto-move' });
-    }
-    const result = await sendToFrame(tab.id, videoFrameId, {
+    const result = await sendToFrame(tabId, entry.frameId, {
       action:           'enable-auto',
       captureSubtitles: recordMode === 'subtitles',
+      videoIndex:       entry.localIndex,
     });
     if (result?.success) {
-      showIdle(detection.hasVideo);
+      btn.textContent = '⏸ Auto Play ON';
+      btn.classList.add('active');
+      btn.closest('.video-row').classList.add('auto-active');
+      setMsg(`Watching Video ${gi + 1} — will record when it plays.`);
     } else {
-      autoToggle.checked = false;
-      setMsg(result?.error || 'Could not enable auto mode.', 'err');
+      setMsg(result?.error || 'Could not enable.', 'err');
     }
-  } else {
-    await sendToFrame(tab.id, videoFrameId, { action: 'disable-auto' });
-    showIdle(detection.hasVideo);
-  }
-});
-
-// ── Auto Move toggle ──────────────────────────────────────────────────────────
-autoMoveToggle.addEventListener('change', async () => {
-  const tab = await getActiveTab();
-  if (!tab?.id) return;
-
-  await injectAll(tab.id);
-  const detection = await detectVideoFrame(tab.id);
-  videoFrameId = detection.frameId;
-
-  if (autoMoveToggle.checked) {
-    // Disable Auto Play if active
-    if (autoToggle.checked) {
-      autoToggle.checked = false;
-      await sendToFrame(tab.id, videoFrameId, { action: 'disable-auto' });
-    }
-    const result = await sendToFrame(tab.id, videoFrameId, {
-      action:           'enable-auto-move',
-      captureSubtitles: recordMode === 'subtitles',
-    });
-    if (result?.success) {
-      btnStart.style.display = 'none';
-      btnStop.style.display  = 'block';
-      modeRow.style.display  = 'none';
-      setMsg(`Found ${result.total} video${result.total !== 1 ? 's' : ''} — recording in sequence\u2026`);
-    } else {
-      autoMoveToggle.checked = false;
-      setMsg(result?.error || 'Could not start Auto Move.', 'err');
-    }
-  } else {
-    await sendToFrame(tab.id, videoFrameId, { action: 'disable-auto-move' });
-    showIdle(detection.hasVideo);
-  }
-});
-
-// ── Init ──────────────────────────────────────────────────────────────────────
-async function init() {
-  setMsg('Scanning\u2026');
-  const tab = await getActiveTab();
-  if (!tab?.id) { setMsg('Cannot access this tab.', 'err'); return; }
-
-  await injectAll(tab.id);
-
-  const detection = await detectVideoFrame(tab.id);
-  videoFrameId = detection.frameId;
-
-  if (detection.hasVideo) {
-    const status = await sendToFrame(tab.id, videoFrameId, { action: 'status' });
-    showStreamUrl(status?.streamUrls);
-    // Reflect auto mode that was already set in the content script
-    if (status?.autoMode)     autoToggle.checked = true;
-    if (status?.autoMoveMode) autoMoveToggle.checked = true;
-    if (status?.isRecording) {
-      showRecording(status.mimeType?.includes('mp4') ? 'MP4' : 'WebM');
-      if (status?.autoMoveMode) {
-        setMsg(`Video ${status.queueIndex} of ${status.queueTotal} \u2014 recording\u2026`);
-      }
-    } else {
-      showIdle(true);
-    }
-  } else {
-    showIdle(false);
   }
 }
 
-// ── Start ─────────────────────────────────────────────────────────────────────
-btnStart.addEventListener('click', async () => {
-  btnStart.disabled = true;
-  setMsg('Starting\u2026');
-
-  const tab = await getActiveTab();
-  await injectAll(tab.id);
-
-  const detection = await detectVideoFrame(tab.id);
-  videoFrameId = detection.frameId;
-
-  if (!detection.hasVideo) {
-    setMsg('No video found \u2014 try refreshing the page.', 'err');
-    btnStart.disabled = false;
+// ── Auto Move ─────────────────────────────────────────────────────────────────
+btnMove.addEventListener('click', async () => {
+  if (btnMove.classList.contains('active')) {
+    await sendToFrame(tabId, videoFrameId, { action: 'disable-auto-move' });
+    btnMove.classList.remove('active');
+    btnMove.textContent = '⟳ Auto Move — Record all in sequence';
+    setMsg('');
     return;
   }
-
-  const result = await sendToFrame(tab.id, videoFrameId, {
-    action:           'start',
+  await sendToFrame(tabId, videoFrameId, { action: 'disable-auto' });
+  listEl.querySelectorAll('.btn-auto').forEach(b => {
+    b.textContent = '▶ Auto Play'; b.classList.remove('active');
+    b.closest('.video-row').classList.remove('auto-active');
+  });
+  const result = await sendToFrame(tabId, videoFrameId, {
+    action:           'enable-auto-move',
     captureSubtitles: recordMode === 'subtitles',
   });
-
   if (result?.success) {
-    showRecording(result.isMP4 ? 'MP4' : 'WebM');
+    btnMove.classList.add('active');
+    btnMove.textContent = `⟳ Auto Move ON — ${result.total} video${result.total !== 1 ? 's' : ''} queued`;
+    setMsg(`Recording ${result.total} videos in sequence…`);
   } else {
-    setMsg(result?.error || 'Failed to start recording.', 'err');
-    btnStart.disabled = false;
+    setMsg(result?.error || 'Could not start Auto Move.', 'err');
   }
 });
 
 // ── Stop ──────────────────────────────────────────────────────────────────────
 btnStop.addEventListener('click', async () => {
-  btnStop.disabled = true;
-  setMsg('Saving\u2026');
-  const tab    = await getActiveTab();
-  const result = await sendToFrame(tab.id, videoFrameId, { action: 'stop' });
-  if (result?.success) {
-    showIdle(true);
-    setMsg('Saved to Downloads folder.', 'ok');
-  } else {
-    setMsg(result?.error || 'Failed to stop.', 'err');
-    btnStop.disabled = false;
-  }
+  await sendToFrame(tabId, videoFrameId, { action: 'stop' });
+  btnMove.classList.remove('active');
+  btnMove.textContent = '⟳ Auto Move — Record all in sequence';
+  listEl.querySelectorAll('.btn-auto').forEach(b => {
+    b.textContent = '▶ Auto Play'; b.classList.remove('active');
+    b.closest('.video-row').classList.remove('auto-active');
+  });
 });
 
-// ── Messages from content script ──────────────────────────────────────────────
+// ── Runtime messages from content ─────────────────────────────────────────────
 chrome.runtime.onMessage.addListener(msg => {
   if (msg.event === 'recording-stopped') {
-    showIdle(true);
-    setMsg('Video ended \u2014 saved to Downloads.', 'ok');
+    stopTimer();
+    dot.className      = 'dot ok';
+    statusText.textContent = 'Saved — ready';
+    btnStop.style.display  = 'none';
+    setMsg('Saved to Downloads.', 'ok');
   }
   if (msg.event === 'queue-progress') {
-    showRecording(mimeType?.includes('mp4') ? 'MP4' : 'WebM');
-    setMsg(`Video ${msg.current} of ${msg.total} \u2014 recording\u2026`);
+    setMsg(`Recording video ${msg.current} of ${msg.total}…`);
   }
   if (msg.event === 'queue-complete') {
-    autoMoveToggle.checked = false;
-    showIdle(true);
-    setMsg(`All ${msg.total} video${msg.total !== 1 ? 's' : ''} saved to Downloads.`, 'ok');
+    btnMove.classList.remove('active');
+    btnMove.textContent    = '⟳ Auto Move — Record all in sequence';
+    stopTimer();
+    dot.className          = 'dot ok';
+    statusText.textContent = 'All done';
+    btnStop.style.display  = 'none';
+    setMsg(`All ${msg.total} videos saved.`, 'ok');
   }
 });
 
-// Poll for HLS stream URLs every 2s
-setInterval(async () => {
+// ── Render ────────────────────────────────────────────────────────────────────
+function render(entries, status) {
+  videoEntries = entries;
+
+  // Video list
+  if (!entries.length) {
+    listEl.innerHTML = '<p class="empty">No videos found on this page.</p>';
+    btnMove.disabled = true;
+  } else {
+    btnMove.disabled = false;
+    listEl.innerHTML = entries.map(e => `
+      <div class="video-row" data-gi="${e.globalIndex}">
+        <div class="v-dot"></div>
+        <span class="v-label">Video ${e.globalIndex + 1}</span>
+        <button class="btn-auto" data-gi="${e.globalIndex}">▶ Auto Play</button>
+      </div>`).join('');
+    listEl.querySelectorAll('.btn-auto').forEach(btn => {
+      btn.addEventListener('click', () => toggleAutoPlay(+btn.dataset.gi, btn));
+    });
+  }
+
+  // Status bar
+  if (status?.isRecording) {
+    dot.className          = 'dot rec';
+    statusText.textContent = status?.autoMoveMode
+      ? `Recording video ${status.queueIndex} of ${status.queueTotal}…`
+      : 'Recording…';
+    btnStop.style.display  = 'block';
+    if (!timerInterval) startTimer();
+  } else {
+    if (!status?.autoMode && timerInterval) stopTimer();
+    dot.className          = entries.length ? 'dot ok' : 'dot warn';
+    statusText.textContent = entries.length
+      ? `${entries.length} video${entries.length !== 1 ? 's' : ''} detected`
+      : 'No videos found on this page';
+    btnStop.style.display  = 'none';
+  }
+
+  // Auto Move button state
+  if (status?.autoMoveMode) {
+    btnMove.classList.add('active');
+    btnMove.textContent = `⟳ Auto Move ON — ${status.queueTotal} video${status.queueTotal !== 1 ? 's' : ''} queued`;
+  }
+}
+
+// ── Init + poll ───────────────────────────────────────────────────────────────
+async function refresh() {
+  const entries = await scanVideos(tabId);
+  const status  = await sendToFrame(tabId, videoFrameId, { action: 'status' });
+  render(entries, status);
+}
+
+async function init() {
   const tab = await getActiveTab();
-  if (!tab?.id) return;
-  const status = await sendToFrame(tab.id, videoFrameId, { action: 'status' });
-  if (status?.streamUrls?.length) showStreamUrl(status.streamUrls);
-}, 2000);
+  if (!tab?.id) { listEl.innerHTML = '<p class="empty">Cannot access this tab.</p>'; return; }
+  tabId = tab.id;
+  await injectAll(tabId);
+  await refresh();
+  setInterval(refresh, 2000);
+}
 
 init();

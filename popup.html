@@ -12,212 +12,128 @@
       color: #e5e7eb;
     }
 
+    /* ── Header ── */
     header {
       background: #1f2937;
-      padding: 12px 14px;
+      padding: 11px 14px;
       border-bottom: 1px solid #374151;
-      display: flex;
-      align-items: center;
-      gap: 10px;
+      display: flex; align-items: center; gap: 10px;
     }
-    .logo {
-      width: 30px; height: 30px;
-      background: #dc2626;
-      border-radius: 7px;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 15px; flex-shrink: 0;
-    }
-    h1    { font-size: 13px; font-weight: 700; color: #f9fafb; }
-    .sub  { font-size: 10px; color: #6b7280; margin-top: 2px; }
+    header img { border-radius: 6px; flex-shrink: 0; }
+    h1   { font-size: 13px; font-weight: 700; color: #f9fafb; }
+    .sub { font-size: 10px; color: #6b7280; margin-top: 1px; }
 
-    main { padding: 13px; display: flex; flex-direction: column; gap: 10px; }
-
-    /* ── Status card ── */
-    .card {
-      background: #1f2937;
-      border: 1px solid #374151;
-      border-radius: 8px;
-      padding: 11px 12px;
-    }
-
-    .row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 12px;
-    }
-
-    .dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: #4b5563; flex-shrink: 0;
-      transition: background 0.25s;
-    }
-    .dot.ok   { background: #22c55e; }
-    .dot.rec  { background: #dc2626; animation: blink 1s ease-in-out infinite; }
-    .dot.warn { background: #f59e0b; }
-
-    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.25} }
-
-    #statusText { color: #d1d5db; flex: 1; font-size: 12px; }
-
-    .badge {
-      background: #374151; color: #60a5fa;
-      border-radius: 4px; padding: 2px 6px;
-      font-size: 10px; font-weight: 700; letter-spacing: 0.4px;
-    }
-
-    .timer {
-      text-align: center;
-      font-size: 30px; font-weight: 800;
-      letter-spacing: 3px;
-      font-variant-numeric: tabular-nums;
-      margin-top: 8px; color: #374151;
-      transition: color 0.3s;
-    }
-    .timer.active { color: #dc2626; }
+    main { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 
     /* ── Mode pills ── */
-    .modes {
-      display: flex; gap: 6px;
-    }
+    .modes { display: flex; gap: 6px; }
     .mode-pill {
-      flex: 1; padding: 7px 0;
-      border-radius: 6px; border: 1px solid #374151;
-      background: #1f2937; color: #9ca3af;
-      font-size: 11px; font-weight: 600;
-      cursor: pointer; text-align: center;
-      transition: all 0.15s;
+      flex: 1; padding: 7px 0; border-radius: 6px;
+      border: 1px solid #374151; background: #1f2937;
+      color: #9ca3af; font-size: 11px; font-weight: 600;
+      cursor: pointer; text-align: center; transition: all 0.15s;
     }
-    .mode-pill.active {
-      background: #1e3a5f; border-color: #3b82f6; color: #93c5fd;
-    }
+    .mode-pill.active { background: #1e3a5f; border-color: #3b82f6; color: #93c5fd; }
     .mode-pill:hover:not(.active) { border-color: #4b5563; color: #d1d5db; }
+
+    /* ── Status bar ── */
+    .status-bar {
+      display: flex; align-items: center; gap: 8px;
+      background: #1f2937; border: 1px solid #374151;
+      border-radius: 8px; padding: 9px 12px;
+      font-size: 12px;
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #4b5563; flex-shrink: 0; transition: background 0.25s;
+    }
+    .dot.ok  { background: #22c55e; }
+    .dot.rec { background: #dc2626; animation: blink 1s ease-in-out infinite; }
+    .dot.warn{ background: #f59e0b; }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.2} }
+    #statusText { flex: 1; color: #d1d5db; }
+    .timer { font-size: 12px; font-weight: 700; color: #dc2626; font-variant-numeric: tabular-nums; }
+
+    /* ── Video list ── */
+    #videoList { display: flex; flex-direction: column; gap: 6px; }
+
+    .video-row {
+      display: flex; align-items: center; gap: 10px;
+      background: #1f2937; border: 1px solid #374151;
+      border-radius: 8px; padding: 10px 12px;
+    }
+    .video-row.auto-active { border-color: #3b82f6; background: #1a2744; }
+    .video-row.recording   { border-color: #dc2626; background: #1f1010; }
+
+    .v-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: #374151; flex-shrink: 0;
+    }
+    .video-row.auto-active .v-dot { background: #3b82f6; }
+    .video-row.recording   .v-dot { background: #dc2626; animation: blink 1s ease-in-out infinite; }
+
+    .v-label { flex: 1; font-size: 13px; color: #d1d5db; font-weight: 500; }
+    .v-badge { font-size: 10px; color: #dc2626; font-weight: 700; margin-right: 6px; }
+
+    .btn-auto {
+      padding: 4px 11px; border: 1px solid #374151;
+      background: #1f2937; color: #9ca3af;
+      border-radius: 5px; font-size: 11px; font-weight: 600;
+      cursor: pointer; white-space: nowrap; transition: all 0.15s;
+    }
+    .btn-auto:hover { border-color: #3b82f6; color: #60a5fa; }
+    .btn-auto.active { background: #1e3a5f; border-color: #3b82f6; color: #93c5fd; }
 
     /* ── Buttons ── */
     .btn {
-      width: 100%; padding: 11px; border: none; border-radius: 8px;
+      width: 100%; padding: 10px; border: none; border-radius: 8px;
       font-size: 13px; font-weight: 700; cursor: pointer;
-      transition: background 0.15s, opacity 0.15s; letter-spacing: 0.3px;
+      transition: background 0.15s; letter-spacing: 0.2px;
     }
     .btn:disabled { opacity: 0.35; cursor: not-allowed; }
-    .btn-start { background: #dc2626; color: #fff; }
-    .btn-start:not(:disabled):hover { background: #b91c1c; }
-    .btn-stop  { background: #374151; color: #e5e7eb; border: 1px solid #4b5563; }
-    .btn-stop:not(:disabled):hover  { background: #4b5563; }
+    .btn-move  { background: #374151; color: #e5e7eb; border: 1px solid #4b5563; }
+    .btn-move:not(:disabled):hover { background: #4b5563; }
+    .btn-move.active { background: #1e3a5f; border-color: #3b82f6; color: #93c5fd; }
+    .btn-stop  { background: #dc2626; color: #fff; display: none; }
+    .btn-stop:hover { background: #b91c1c; }
 
-    /* ── Stream URL section ── */
-    .stream-section { display: none; }
-    .stream-section.visible { display: block; }
-    .stream-label { font-size: 10px; color: #6b7280; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.6px; }
-    .stream-url {
-      background: #0f172a; border: 1px solid #374151; border-radius: 6px;
-      padding: 7px 9px; font-size: 10px; color: #60a5fa;
-      word-break: break-all; cursor: pointer;
-      font-family: 'SFMono-Regular', Consolas, monospace;
-      line-height: 1.5;
-    }
-    .stream-url:hover { background: #1e293b; }
-    .copy-hint { font-size: 9px; color: #4b5563; margin-top: 3px; text-align: right; }
-
-    /* ── Auto toggle ── */
-    .auto-row {
-      display: flex; align-items: center; justify-content: space-between;
-      background: #1f2937; border: 1px solid #374151; border-radius: 8px;
-      padding: 9px 12px;
-    }
-    .auto-label { font-size: 12px; color: #d1d5db; }
-    .auto-label small { display: block; font-size: 10px; color: #6b7280; margin-top: 1px; }
-
-    .toggle { position: relative; width: 38px; height: 20px; flex-shrink: 0; }
-    .toggle input { opacity: 0; width: 0; height: 0; }
-    .toggle-track {
-      position: absolute; inset: 0;
-      background: #374151; border-radius: 20px; cursor: pointer;
-      transition: background 0.2s;
-    }
-    .toggle input:checked + .toggle-track { background: #dc2626; }
-    .toggle-thumb {
-      position: absolute; top: 2px; left: 2px;
-      width: 16px; height: 16px; border-radius: 50%;
-      background: #fff; transition: transform 0.2s; pointer-events: none;
-    }
-    .toggle input:checked ~ .toggle-thumb { transform: translateX(18px); }
-
-    /* ── Message ── */
-    .msg {
-      font-size: 11px; text-align: center; color: #6b7280;
-      min-height: 14px; line-height: 1.5; padding: 0 2px;
-    }
+    .empty { font-size: 12px; color: #6b7280; text-align: center; padding: 10px 0; }
+    .msg { font-size: 11px; color: #6b7280; text-align: center; min-height: 14px; }
     .msg.err { color: #f87171; }
     .msg.ok  { color: #4ade80; }
   </style>
 </head>
 <body>
   <header>
-    <img src="icons/icon48.png" width="28" height="28" style="border-radius:6px;flex-shrink:0">
+    <img src="icons/icon48.png" width="26" height="26">
     <div>
       <h1>Video Recorder</h1>
-      <div class="sub">Capture video + audio + subtitles</div>
+      <div class="sub">Capture video + audio</div>
     </div>
   </header>
 
   <main>
-    <!-- Status -->
-    <div class="card">
-      <div class="row">
-        <div class="dot" id="dot"></div>
-        <span id="statusText">Scanning...</span>
-        <span class="badge" id="formatBadge" style="display:none"></span>
-      </div>
-      <div class="timer" id="timer">00:00</div>
-    </div>
-
-    <!-- Record mode -->
+    <!-- Mode pills -->
     <div class="modes" id="modeRow">
-      <div class="mode-pill active" data-mode="video" title="Records just the video — no subtitle overlays">
-        &#9654; Video only
-      </div>
-      <div class="mode-pill" data-mode="subtitles" title="Records video + any subtitle or overlay text shown on screen">
-        &#128292; Video + Subtitles
-      </div>
+      <div class="mode-pill active" data-mode="video">▶ Video only</div>
+      <div class="mode-pill" data-mode="subtitles">📜 Video + Subtitles</div>
     </div>
 
-    <!-- Auto record toggle -->
-    <div class="auto-row" id="autoRow">
-      <div class="auto-label">
-        Auto Play
-        <small>Starts when video plays, stops when it ends</small>
-      </div>
-      <label class="toggle">
-        <input type="checkbox" id="autoToggle">
-        <div class="toggle-track"></div>
-        <div class="toggle-thumb"></div>
-      </label>
+    <!-- Status -->
+    <div class="status-bar">
+      <div class="dot" id="dot"></div>
+      <span id="statusText">Scanning…</span>
+      <span class="timer" id="timer" style="display:none">00:00</span>
     </div>
 
-    <!-- Auto Move toggle -->
-    <div class="auto-row" id="autoMoveRow">
-      <div class="auto-label">
-        Auto Move
-        <small>Records all videos on page in sequence</small>
-      </div>
-      <label class="toggle">
-        <input type="checkbox" id="autoMoveToggle">
-        <div class="toggle-track"></div>
-        <div class="toggle-thumb"></div>
-      </label>
-    </div>
+    <!-- Video list -->
+    <div id="videoList"></div>
 
-    <!-- Buttons -->
-    <button class="btn btn-start" id="btnStart" disabled>&#9210; Start Recording</button>
-    <button class="btn btn-stop"  id="btnStop"  style="display:none">&#9632; Stop &amp; Save</button>
+    <!-- Auto Move -->
+    <button class="btn btn-move" id="btnMove" disabled>⟳ Auto Move — Record all in sequence</button>
 
-    <!-- Detected HLS stream (Emeritus) -->
-    <div class="stream-section" id="streamSection">
-      <div class="stream-label">Detected HLS stream</div>
-      <div class="stream-url" id="streamUrl"></div>
-      <div class="copy-hint">Click to copy URL</div>
-    </div>
+    <!-- Stop -->
+    <button class="btn btn-stop" id="btnStop">⏹ Stop &amp; Save</button>
 
     <p class="msg" id="msg"></p>
   </main>

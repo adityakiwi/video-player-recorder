@@ -258,11 +258,14 @@ function stopRecording(cancelAutoMove = false) {
 }
 
 // ── Auto Play ─────────────────────────────────────────────────────────────────
-function enableAutoRecord(captureSubtitles) {
+function enableAutoRecord(captureSubtitles, videoIndex = -1) {
   disableAutoRecord();
   disableAutoMove();
 
-  const video = findBestVideo();
+  const all   = collectVideos(document);
+  const video = (videoIndex >= 0 && videoIndex < all.length)
+    ? all[videoIndex]
+    : findBestVideo();
   if (!video) return { success: false, error: 'No video found.' };
 
   autoMode      = true;
@@ -270,7 +273,7 @@ function enableAutoRecord(captureSubtitles) {
 
   autoPlayHandler = () => {
     if (!recorder || recorder.state === 'inactive') {
-      beginRecording(autoSubtitles).catch(() => {});
+      beginRecording(autoSubtitles, video).catch(() => {});
     }
   };
   video.addEventListener('play', autoPlayHandler);
@@ -353,7 +356,7 @@ async function playNextInQueue() {
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   switch (msg.action) {
     case 'status': {
-      const vids = visibleVideos();
+      const vids = collectVideos(document);
       sendResponse({
         hasVideo:    vids.length > 0,
         videoCount:  vids.length,
@@ -377,7 +380,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       break;
 
     case 'enable-auto':
-      sendResponse(enableAutoRecord(msg.captureSubtitles));
+      sendResponse(enableAutoRecord(msg.captureSubtitles, msg.videoIndex ?? -1));
       break;
 
     case 'disable-auto':
