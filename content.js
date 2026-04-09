@@ -1,16 +1,12 @@
 /**
  * content.js — injected into ALL frames (allFrames:true).
  *
- * Strategy: video.captureStream() for the raw video + audio stream, then
- * canvas compositing to add subtitle text drawn from DOM reading.
+ * Two auto modes:
+ *   Auto Play  — attach 'play' listener; record when video plays, stop on 'ended'
+ *   Auto Move  — queue all visible videos on page; record each in sequence
  *
- * This avoids getUserMedia(chromeMediaSource:'tab') which is unreliable
- * from content scripts (MV3 intends it for offscreen documents).
- *
- * "Video only"        → captureStream, no subtitle overlay
- * "Video + Subtitles" → captureStream + reads subtitle text from textTracks
- *                       AND from common player overlay DOM elements (Kaltura,
- *                       JW Player, VideoJS, etc.) and draws them on canvas
+ * Core capture: video.captureStream() + canvas compositing.
+ * Subtitles: Chrome textTracks API + DOM overlay element fallback.
  */
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -22,12 +18,17 @@ let tempVid    = null;
 let mimeType   = '';
 let capturedStreamUrls = [];
 
-// Auto-record state
-let autoMode         = false;
-let autoSubtitles    = false;
-let autoPlayHandler  = null;   // bound listener so we can remove it
+// Auto-play state
+let autoMode        = false;
+let autoSubtitles   = false;
+let autoPlayHandler = null;
 
-// ── Emeritus CDN map ──────────────────────────────────────────────────────────
+// Auto-move (queue) state
+let autoMoveMode  = false;
+let videoQueue    = [];
+let queueIndex    = 0;
+
+// ── Emeritus CDN ──────────────────────────────────────────────────────────────
 window.addEventListener('__vr_stream__', (e) => {
   const url = e.detail?.url;
   if (url && !capturedStreamUrls.includes(url)) capturedStreamUrls.push(url);
@@ -43,6 +44,13 @@ function collectVideos(doc) {
   return vids;
 }
 
+function visibleVideos() {
+  return collectVideos(document).filter(v => {
+    const r = v.getBoundingClientRect();
+    return r.width > 50 && r.height > 50;
+  });
+}
+
 function findBestVideo() {
   const all     = collectVideos(document);
   if (!all.length) return null;
@@ -56,7 +64,6 @@ function findBestVideo() {
   });
 }
 
-/** Nearest positioned ancestor that wraps the video + any overlay sibling divs. */
 function findPlayerContainer(videoEl) {
   const vr = videoEl.getBoundingClientRect();
   const va = vr.width * vr.height;
@@ -74,49 +81,22 @@ function findPlayerContainer(videoEl) {
 }
 
 // ── Subtitle detection ────────────────────────────────────────────────────────
-
-// DOM overlay selectors for common players (searched in player container)
 const SUBTITLE_SELECTORS = [
-  // Kaltura PlayKit (Emeritus)
-  '.playkit-subtitles',
-  '.playkit-captions',
-  '[class*="playkit-subtitle"]',
-  '[class*="playkit-caption"]',
-  // JW Player
-  '.jw-text-track-display',
-  '.jw-captions-text',
-  '[class*="jw-captions"]',
-  // Video.js
-  '.vjs-text-track-display',
-  '.vjs-caption-window',
-  // Shaka Player
+  '.playkit-subtitles', '.playkit-captions',
+  '[class*="playkit-subtitle"]', '[class*="playkit-caption"]',
+  '.jw-text-track-display', '.jw-captions-text', '[class*="jw-captions"]',
+  '.vjs-text-track-display', '.vjs-caption-window',
   '.shaka-text-container',
-  // Bitmovin
   '.bmpui-ui-subtitle-overlay',
-  // Generic
-  '[class*="subtitle-text"]',
-  '[class*="caption-text"]',
-  '[class*="captions-overlay"]',
-  '[class*="cue-block"]',
-  '[class*="subtitles-container"]',
-  '[class*="text-track"]',
+  '[class*="subtitle-text"]', '[class*="caption-text"]',
+  '[class*="captions-overlay"]', '[class*="cue-block"]',
+  '[class*="subtitles-container"]', '[class*="text-track"]',
 ];
 
-/**
- * Reads the current subtitle/CC text via two strategies:
- *
- * 1. Chrome's native textTracks API — works for HLS/DASH embedded CC (CEA-608,
- *    WebVTT in stream). Checks 'showing' tracks first, then briefly enables
- *    'disabled' caption/subtitle tracks to read their activeCues.
- *
- * 2. DOM overlay elements — covers custom player renderers (Kaltura, JW Player…)
- *    that draw their own subtitle divs on top of the video.
- */
 function getSubtitleText(videoEl) {
-  // ── Strategy 1: textTracks (Chrome CC) ──────────────────────────────────
+  // 1. Native textTracks (Chrome CC — works for HLS CEA-608 / WebVTT)
   const tracks = Array.from(videoEl.textTracks || []);
 
-  // First pass: tracks already showing or hidden (cues already loaded)
   for (const track of tracks) {
     if (track.mode === 'disabled') continue;
     if (!track.activeCues?.length) continue;
@@ -126,13 +106,12 @@ function getSubtitleText(videoEl) {
     if (text) return text;
   }
 
-  // Second pass: try enabling any caption/subtitle track that's still disabled
-  // so Chrome loads its cues. We flip it to 'hidden' (invisible but active).
+  // Enable disabled caption tracks so Chrome loads their cues
   for (const track of tracks) {
     if (track.kind !== 'captions' && track.kind !== 'subtitles') continue;
     if (track.mode !== 'disabled') continue;
     try {
-      track.mode = 'hidden';               // ask Chrome to load cues
+      track.mode = 'hidden';
       const cues = track.activeCues;
       if (cues?.length) {
         const text = Array.from(cues)
@@ -140,11 +119,10 @@ function getSubtitleText(videoEl) {
           .filter(Boolean).join('\n');
         if (text) return text;
       }
-      // Leave as 'hidden' so future frames can read it without re-enabling
     } catch { track.mode = 'disabled'; }
   }
 
-  // ── Strategy 2: DOM overlay elements ────────────────────────────────────
+  // 2. DOM overlay elements (custom player renderers)
   const container = findPlayerContainer(videoEl);
   for (const sel of SUBTITLE_SELECTORS) {
     try {
@@ -159,15 +137,11 @@ function getSubtitleText(videoEl) {
   return '';
 }
 
-// ── Canvas helpers ────────────────────────────────────────────────────────────
+// ── Canvas / recording helpers ────────────────────────────────────────────────
 function pickMimeType() {
   const candidates = [
-    'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
-    'video/mp4;codecs=avc1,mp4a.40.2',
-    'video/mp4',
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
-    'video/webm',
+    'video/mp4;codecs="avc1.42E01E,mp4a.40.2"', 'video/mp4;codecs=avc1,mp4a.40.2',
+    'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm',
   ];
   return candidates.find(t => { try { return MediaRecorder.isTypeSupported(t); } catch { return false; } }) || 'video/webm';
 }
@@ -175,22 +149,25 @@ function pickMimeType() {
 function drawSubtitleText(ctx, canvas, text) {
   const sz = Math.max(16, Math.round(canvas.height * 0.038));
   ctx.save();
-  ctx.font      = `bold ${sz}px Arial, sans-serif`;
+  ctx.font = `bold ${sz}px Arial, sans-serif`;
   ctx.textAlign = 'center';
   ctx.lineWidth = Math.max(2, sz * 0.12);
   const baseY = canvas.height - sz * 1.8;
   text.split('\n').forEach((line, i) => {
     const y = baseY + i * (sz + 4);
     ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.strokeText(line, canvas.width / 2, y);
-    ctx.fillStyle   = '#ffffff';           ctx.fillText(line,   canvas.width / 2, y);
+    ctx.fillStyle   = '#fff';              ctx.fillText(line,   canvas.width / 2, y);
   });
   ctx.restore();
 }
 
 function saveBlob(blob, ext) {
   const url = URL.createObjectURL(blob);
-  const a   = Object.assign(document.createElement('a'), { href: url, download: `recording_${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}` });
-  a.style.display = 'none';
+  const a   = Object.assign(document.createElement('a'), {
+    href: url,
+    download: `recording_${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`,
+    style: 'display:none',
+  });
   document.body.appendChild(a); a.click();
   setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 2000);
 }
@@ -203,32 +180,30 @@ function cleanup() {
 }
 
 // ── Core recording ────────────────────────────────────────────────────────────
-async function beginRecording(captureSubtitles) {
-  const videoEl = findBestVideo();
-  if (!videoEl) throw new Error('No video element found on this page or its accessible iframes.');
+/**
+ * @param {boolean} captureSubtitles
+ * @param {HTMLVideoElement|null} specificVideo  pass to override findBestVideo()
+ */
+async function beginRecording(captureSubtitles, specificVideo = null) {
+  const videoEl = specificVideo || findBestVideo();
+  if (!videoEl) throw new Error('No video element found.');
 
-  // Get the raw stream from the video element
   let elemStream;
-  try {
-    elemStream = videoEl.captureStream();
-  } catch (e) {
-    throw new Error(`captureStream() failed: ${e.message}`);
-  }
-  if (!elemStream.getTracks().length) {
-    throw new Error('captureStream() returned no tracks — the video may be DRM-protected.');
-  }
+  try { elemStream = videoEl.captureStream(); }
+  catch (e) { throw new Error(`captureStream() failed: ${e.message}`); }
+  if (!elemStream.getTracks().length)
+    throw new Error('captureStream() returned no tracks — video may be DRM-protected.');
 
   const [videoTrack] = elemStream.getVideoTracks();
   const settings = videoTrack.getSettings();
-
-  const canvas = document.createElement('canvas');
-  canvas.width  = settings.width  || videoEl.videoWidth  || 1280;
-  canvas.height = settings.height || videoEl.videoHeight || 720;
-  const ctx = canvas.getContext('2d');
+  const canvas   = document.createElement('canvas');
+  canvas.width   = settings.width  || videoEl.videoWidth  || 1280;
+  canvas.height  = settings.height || videoEl.videoHeight || 720;
+  const ctx      = canvas.getContext('2d');
 
   tempVid = document.createElement('video');
   tempVid.srcObject = new MediaStream([videoTrack]);
-  tempVid.muted     = true;
+  tempVid.muted = true;
   await tempVid.play();
 
   function drawFrame() {
@@ -241,7 +216,6 @@ async function beginRecording(captureSubtitles) {
   }
   drawFrame();
 
-  // Canvas video track + original audio tracks
   recStream = canvas.captureStream(30);
   elemStream.getAudioTracks().forEach(t => recStream.addTrack(t));
 
@@ -249,72 +223,143 @@ async function beginRecording(captureSubtitles) {
   chunks   = [];
   recorder = new MediaRecorder(recStream, { mimeType });
   recorder.ondataavailable = (e) => { if (e.data?.size > 0) chunks.push(e.data); };
+
   recorder.onstop = () => {
     saveBlob(new Blob(chunks, { type: mimeType }), mimeType.includes('mp4') ? 'mp4' : 'webm');
     chunks = [];
     cleanup();
-    chrome.runtime.sendMessage({ event: 'recording-stopped' }).catch(() => {});
+    if (autoMoveMode) {
+      // Auto-advance to next video in queue after short pause
+      setTimeout(playNextInQueue, 1200);
+    } else {
+      chrome.runtime.sendMessage({ event: 'recording-stopped' }).catch(() => {});
+    }
   };
 
   recorder.start(1000);
-  videoEl.addEventListener('ended', () => stopRecording(), { once: true });
+
+  // Auto-stop when this video ends (works for both auto modes and manual)
+  videoEl.addEventListener('ended', () => {
+    if (recorder?.state === 'recording') recorder.stop();
+  }, { once: true });
 
   return { success: true, mimeType, isMP4: mimeType.includes('mp4') };
 }
 
-function stopRecording() {
+function stopRecording(cancelAutoMove = false) {
+  if (cancelAutoMove) {
+    autoMoveMode = false;
+    videoQueue   = [];
+    queueIndex   = 0;
+  }
   if (!recorder || recorder.state === 'inactive') return { success: false, error: 'Not recording.' };
   try { recorder.stop(); return { success: true }; }
   catch (e) { return { success: false, error: e.message }; }
 }
 
-// ── Auto-record ───────────────────────────────────────────────────────────────
+// ── Auto Play ─────────────────────────────────────────────────────────────────
 function enableAutoRecord(captureSubtitles) {
-  // Remove any existing listener first
   disableAutoRecord();
+  disableAutoMove();
 
   const video = findBestVideo();
-  if (!video) return { success: false, error: 'No video found to watch.' };
+  if (!video) return { success: false, error: 'No video found.' };
 
   autoMode      = true;
   autoSubtitles = captureSubtitles;
 
   autoPlayHandler = () => {
-    // Only start if not already recording
     if (!recorder || recorder.state === 'inactive') {
       beginRecording(autoSubtitles).catch(() => {});
     }
   };
-
   video.addEventListener('play', autoPlayHandler);
 
-  // If video is already playing when auto-mode is enabled, start immediately
-  if (!video.paused && !video.ended) {
-    autoPlayHandler();
-  }
-
+  if (!video.paused && !video.ended) autoPlayHandler();
   return { success: true };
 }
 
 function disableAutoRecord() {
+  if (!autoMode) return;
   autoMode = false;
   if (autoPlayHandler) {
-    const video = findBestVideo();
-    video?.removeEventListener('play', autoPlayHandler);
+    findBestVideo()?.removeEventListener('play', autoPlayHandler);
     autoPlayHandler = null;
   }
-  return { success: true };
+}
+
+// ── Auto Move (queue) ─────────────────────────────────────────────────────────
+function enableAutoMove(captureSubtitles) {
+  disableAutoRecord();
+  disableAutoMove();
+
+  const vids = visibleVideos();
+  if (!vids.length) return { success: false, error: 'No videos found on this page.' };
+
+  autoMoveMode  = true;
+  autoSubtitles = captureSubtitles;
+  videoQueue    = vids;
+  queueIndex    = 0;
+
+  playNextInQueue();
+  return { success: true, total: vids.length };
+}
+
+function disableAutoMove() {
+  autoMoveMode = false;
+  videoQueue   = [];
+  queueIndex   = 0;
+}
+
+async function playNextInQueue() {
+  if (!autoMoveMode || queueIndex >= videoQueue.length) {
+    const total = videoQueue.length;
+    autoMoveMode = false;
+    videoQueue   = [];
+    queueIndex   = 0;
+    chrome.runtime.sendMessage({ event: 'queue-complete', total }).catch(() => {});
+    return;
+  }
+
+  const video   = videoQueue[queueIndex];
+  const current = queueIndex + 1;
+  const total   = videoQueue.length;
+  queueIndex++;
+
+  chrome.runtime.sendMessage({ event: 'queue-progress', current, total }).catch(() => {});
+
+  // Rewind and play the video
+  try {
+    video.currentTime = 0;
+    await video.play();
+  } catch (e) {
+    console.warn(`[VR] Auto Move: could not play video ${current}/${total}:`, e.message);
+    // Skip unplayable video
+    setTimeout(playNextInQueue, 500);
+    return;
+  }
+
+  try {
+    await beginRecording(autoSubtitles, video);
+  } catch (e) {
+    console.warn(`[VR] Auto Move: could not record video ${current}/${total}:`, e.message);
+    setTimeout(playNextInQueue, 500);
+  }
 }
 
 // ── Message handler ───────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   switch (msg.action) {
     case 'status': {
-      const video = findBestVideo();
+      const vids = visibleVideos();
       sendResponse({
-        hasVideo:    !!video,
+        hasVideo:    vids.length > 0,
+        videoCount:  vids.length,
         isRecording: recorder?.state === 'recording',
         autoMode,
+        autoMoveMode,
+        queueIndex,
+        queueTotal:  videoQueue.length,
         mimeType,
         streamUrls:  capturedStreamUrls,
       });
@@ -322,12 +367,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
     case 'start':
       beginRecording(msg.captureSubtitles)
-        .then(sendResponse)
-        .catch(e => sendResponse({ success: false, error: e.message }));
+        .then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;
 
     case 'stop':
-      sendResponse(stopRecording());
+      sendResponse(stopRecording(true)); // cancel auto modes too
       break;
 
     case 'enable-auto':
@@ -335,7 +379,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       break;
 
     case 'disable-auto':
-      sendResponse(disableAutoRecord());
+      disableAutoRecord();
+      sendResponse({ success: true });
+      break;
+
+    case 'enable-auto-move':
+      sendResponse(enableAutoMove(msg.captureSubtitles));
+      break;
+
+    case 'disable-auto-move':
+      disableAutoMove();
+      sendResponse({ success: true });
       break;
   }
   return true;

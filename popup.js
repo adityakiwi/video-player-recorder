@@ -1,22 +1,25 @@
 // ── DOM refs ──────────────────────────────────────────────────────────────────
-const dot           = document.getElementById('dot');
-const statusText    = document.getElementById('statusText');
-const formatBadge   = document.getElementById('formatBadge');
-const timerEl       = document.getElementById('timer');
-const btnStart      = document.getElementById('btnStart');
-const btnStop       = document.getElementById('btnStop');
-const streamSection = document.getElementById('streamSection');
-const streamUrlEl   = document.getElementById('streamUrl');
-const msgEl         = document.getElementById('msg');
-const modeRow       = document.getElementById('modeRow');
-const autoToggle    = document.getElementById('autoToggle');
-const autoRow       = document.getElementById('autoRow');
+const dot             = document.getElementById('dot');
+const statusText      = document.getElementById('statusText');
+const formatBadge     = document.getElementById('formatBadge');
+const timerEl         = document.getElementById('timer');
+const btnStart        = document.getElementById('btnStart');
+const btnStop         = document.getElementById('btnStop');
+const streamSection   = document.getElementById('streamSection');
+const streamUrlEl     = document.getElementById('streamUrl');
+const msgEl           = document.getElementById('msg');
+const modeRow         = document.getElementById('modeRow');
+const autoToggle      = document.getElementById('autoToggle');
+const autoRow         = document.getElementById('autoRow');
+const autoMoveToggle  = document.getElementById('autoMoveToggle');
+const autoMoveRow     = document.getElementById('autoMoveRow');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let timerInterval = null;
 let elapsed       = 0;
 let recordMode    = 'video';   // 'video' | 'subtitles'
 let videoFrameId  = 0;         // frameId of the frame that contains the video
+let mimeType      = '';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const pad = n => String(n).padStart(2, '0');
@@ -112,15 +115,17 @@ function showIdle(hasVideo) {
 }
 
 function showRecording(fmt) {
+  if (fmt) mimeType = fmt;
   dot.className = 'dot rec';
   statusText.textContent = 'Recording\u2026';
-  formatBadge.textContent = fmt; formatBadge.style.display = 'inline';
+  const label = fmt || mimeType || 'WebM';
+  formatBadge.textContent = label; formatBadge.style.display = 'inline';
   btnStart.style.display = 'none';
   // In auto mode, keep stop button visible so user can force-stop
   btnStop.style.display  = 'block'; btnStop.disabled = false;
   modeRow.style.display  = 'none';
   startTimer();
-  setMsg(fmt + ' \u00B7 ' + (recordMode === 'subtitles' ? 'Video + Subtitles' : 'Video only'));
+  setMsg(label + ' \u00B7 ' + (recordMode === 'subtitles' ? 'Video + Subtitles' : 'Video only'));
 }
 
 function showStreamUrl(urls) {
@@ -148,7 +153,7 @@ streamUrlEl.addEventListener('click', () => {
   });
 });
 
-// ── Auto toggle ───────────────────────────────────────────────────────────────
+// ── Auto Play toggle ──────────────────────────────────────────────────────────
 autoToggle.addEventListener('change', async () => {
   const tab = await getActiveTab();
   if (!tab?.id) return;
@@ -158,18 +163,57 @@ autoToggle.addEventListener('change', async () => {
   videoFrameId = detection.frameId;
 
   if (autoToggle.checked) {
+    // Disable Auto Move if active
+    if (autoMoveToggle.checked) {
+      autoMoveToggle.checked = false;
+      await sendToFrame(tab.id, videoFrameId, { action: 'disable-auto-move' });
+    }
     const result = await sendToFrame(tab.id, videoFrameId, {
       action:           'enable-auto',
       captureSubtitles: recordMode === 'subtitles',
     });
     if (result?.success) {
-      showIdle(detection.hasVideo);   // re-render idle with auto message
+      showIdle(detection.hasVideo);
     } else {
       autoToggle.checked = false;
       setMsg(result?.error || 'Could not enable auto mode.', 'err');
     }
   } else {
     await sendToFrame(tab.id, videoFrameId, { action: 'disable-auto' });
+    showIdle(detection.hasVideo);
+  }
+});
+
+// ── Auto Move toggle ──────────────────────────────────────────────────────────
+autoMoveToggle.addEventListener('change', async () => {
+  const tab = await getActiveTab();
+  if (!tab?.id) return;
+
+  await injectAll(tab.id);
+  const detection = await detectVideoFrame(tab.id);
+  videoFrameId = detection.frameId;
+
+  if (autoMoveToggle.checked) {
+    // Disable Auto Play if active
+    if (autoToggle.checked) {
+      autoToggle.checked = false;
+      await sendToFrame(tab.id, videoFrameId, { action: 'disable-auto' });
+    }
+    const result = await sendToFrame(tab.id, videoFrameId, {
+      action:           'enable-auto-move',
+      captureSubtitles: recordMode === 'subtitles',
+    });
+    if (result?.success) {
+      btnStart.style.display = 'none';
+      btnStop.style.display  = 'block';
+      modeRow.style.display  = 'none';
+      setMsg(`Found ${result.total} video${result.total !== 1 ? 's' : ''} — recording in sequence\u2026`);
+    } else {
+      autoMoveToggle.checked = false;
+      setMsg(result?.error || 'Could not start Auto Move.', 'err');
+    }
+  } else {
+    await sendToFrame(tab.id, videoFrameId, { action: 'disable-auto-move' });
     showIdle(detection.hasVideo);
   }
 });
@@ -189,9 +233,13 @@ async function init() {
     const status = await sendToFrame(tab.id, videoFrameId, { action: 'status' });
     showStreamUrl(status?.streamUrls);
     // Reflect auto mode that was already set in the content script
-    if (status?.autoMode) autoToggle.checked = true;
+    if (status?.autoMode)     autoToggle.checked = true;
+    if (status?.autoMoveMode) autoMoveToggle.checked = true;
     if (status?.isRecording) {
       showRecording(status.mimeType?.includes('mp4') ? 'MP4' : 'WebM');
+      if (status?.autoMoveMode) {
+        setMsg(`Video ${status.queueIndex} of ${status.queueTotal} \u2014 recording\u2026`);
+      }
     } else {
       showIdle(true);
     }
@@ -245,11 +293,20 @@ btnStop.addEventListener('click', async () => {
   }
 });
 
-// ── Auto-stop from content script ────────────────────────────────────────────
+// ── Messages from content script ──────────────────────────────────────────────
 chrome.runtime.onMessage.addListener(msg => {
   if (msg.event === 'recording-stopped') {
     showIdle(true);
     setMsg('Video ended \u2014 saved to Downloads.', 'ok');
+  }
+  if (msg.event === 'queue-progress') {
+    showRecording(mimeType?.includes('mp4') ? 'MP4' : 'WebM');
+    setMsg(`Video ${msg.current} of ${msg.total} \u2014 recording\u2026`);
+  }
+  if (msg.event === 'queue-complete') {
+    autoMoveToggle.checked = false;
+    showIdle(true);
+    setMsg(`All ${msg.total} video${msg.total !== 1 ? 's' : ''} saved to Downloads.`, 'ok');
   }
 });
 
