@@ -10,8 +10,6 @@ let chunks          = [];
 let mimeType        = '';
 let recordingIndex  = -1;
 let recordingStart  = 0;   // Date.now() when recording began
-let autoRecord      = false;
-
 window.__vrRecording      = false;
 window.__vrRecordingIndex = -1;
 window.__vrRecordingStart = 0;
@@ -91,9 +89,7 @@ function attachListeners() {
   for (const v of getVideos()) {
     if (v.__vrAttached) continue;
     v.__vrAttached = true;
-    v.addEventListener('play', () => {
-      if (autoRecord) startRecording(v);
-    });
+    v.addEventListener('play', () => startRecording(v));
   }
 }
 
@@ -118,7 +114,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       isRecording:    recorder?.state === 'recording',
       recordingIndex,
       recordingStart,
-      autoRecord,
     });
     return true;
   }
@@ -128,12 +123,6 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (!video) { sendResponse({ success: false }); return true; }
     video.currentTime = 0;
     video.play().catch(() => {}).finally(() => startRecording(video));
-    sendResponse({ success: true });
-    return true;
-  }
-
-  if (msg.action === 'set-auto') {
-    autoRecord = msg.enabled;
     sendResponse({ success: true });
     return true;
   }
