@@ -9,6 +9,8 @@ const streamSection = document.getElementById('streamSection');
 const streamUrlEl   = document.getElementById('streamUrl');
 const msgEl         = document.getElementById('msg');
 const modeRow       = document.getElementById('modeRow');
+const autoToggle    = document.getElementById('autoToggle');
+const autoRow       = document.getElementById('autoRow');
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let timerInterval = null;
@@ -98,11 +100,15 @@ function showIdle(hasVideo) {
   dot.className = hasVideo ? 'dot ok' : 'dot warn';
   statusText.textContent = hasVideo ? 'Video player detected' : 'No video found on page';
   formatBadge.style.display = 'none';
-  btnStart.style.display = 'block'; btnStart.disabled = !hasVideo;
-  btnStop.style.display  = 'none';  btnStop.disabled  = false;
+  // Hide manual start/stop when auto mode is on
+  btnStart.style.display = autoToggle.checked ? 'none' : 'block';
+  btnStart.disabled      = !hasVideo;
+  btnStop.style.display  = 'none'; btnStop.disabled = false;
   modeRow.style.display  = 'flex';
   stopTimer();
-  setMsg(hasVideo ? '' : 'Navigate to a page with an HTML5 video player.');
+  setMsg(hasVideo
+    ? (autoToggle.checked ? 'Watching\u2026 will record when video plays.' : '')
+    : 'Navigate to a page with an HTML5 video player.');
 }
 
 function showRecording(fmt) {
@@ -110,6 +116,7 @@ function showRecording(fmt) {
   statusText.textContent = 'Recording\u2026';
   formatBadge.textContent = fmt; formatBadge.style.display = 'inline';
   btnStart.style.display = 'none';
+  // In auto mode, keep stop button visible so user can force-stop
   btnStop.style.display  = 'block'; btnStop.disabled = false;
   modeRow.style.display  = 'none';
   startTimer();
@@ -141,6 +148,32 @@ streamUrlEl.addEventListener('click', () => {
   });
 });
 
+// ── Auto toggle ───────────────────────────────────────────────────────────────
+autoToggle.addEventListener('change', async () => {
+  const tab = await getActiveTab();
+  if (!tab?.id) return;
+
+  await injectAll(tab.id);
+  const detection = await detectVideoFrame(tab.id);
+  videoFrameId = detection.frameId;
+
+  if (autoToggle.checked) {
+    const result = await sendToFrame(tab.id, videoFrameId, {
+      action:           'enable-auto',
+      captureSubtitles: recordMode === 'subtitles',
+    });
+    if (result?.success) {
+      showIdle(detection.hasVideo);   // re-render idle with auto message
+    } else {
+      autoToggle.checked = false;
+      setMsg(result?.error || 'Could not enable auto mode.', 'err');
+    }
+  } else {
+    await sendToFrame(tab.id, videoFrameId, { action: 'disable-auto' });
+    showIdle(detection.hasVideo);
+  }
+});
+
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
   setMsg('Scanning\u2026');
@@ -155,6 +188,8 @@ async function init() {
   if (detection.hasVideo) {
     const status = await sendToFrame(tab.id, videoFrameId, { action: 'status' });
     showStreamUrl(status?.streamUrls);
+    // Reflect auto mode that was already set in the content script
+    if (status?.autoMode) autoToggle.checked = true;
     if (status?.isRecording) {
       showRecording(status.mimeType?.includes('mp4') ? 'MP4' : 'WebM');
     } else {

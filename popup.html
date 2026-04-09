@@ -119,6 +119,30 @@
     .stream-url:hover { background: #1e293b; }
     .copy-hint { font-size: 9px; color: #4b5563; margin-top: 3px; text-align: right; }
 
+    /* ── Auto toggle ── */
+    .auto-row {
+      display: flex; align-items: center; justify-content: space-between;
+      background: #1f2937; border: 1px solid #374151; border-radius: 8px;
+      padding: 9px 12px;
+    }
+    .auto-label { font-size: 12px; color: #d1d5db; }
+    .auto-label small { display: block; font-size: 10px; color: #6b7280; margin-top: 1px; }
+
+    .toggle { position: relative; width: 38px; height: 20px; flex-shrink: 0; }
+    .toggle input { opacity: 0; width: 0; height: 0; }
+    .toggle-track {
+      position: absolute; inset: 0;
+      background: #374151; border-radius: 20px; cursor: pointer;
+      transition: background 0.2s;
+    }
+    .toggle input:checked + .toggle-track { background: #dc2626; }
+    .toggle-thumb {
+      position: absolute; top: 2px; left: 2px;
+      width: 16px; height: 16px; border-radius: 50%;
+      background: #fff; transition: transform 0.2s; pointer-events: none;
+    }
+    .toggle input:checked ~ .toggle-thumb { transform: translateX(18px); }
+
     /* ── Message ── */
     .msg {
       font-size: 11px; text-align: center; color: #6b7280;
@@ -156,6 +180,19 @@
       <div class="mode-pill" data-mode="subtitles" title="Records video + any subtitle or overlay text shown on screen">
         &#128292; Video + Subtitles
       </div>
+    </div>
+
+    <!-- Auto record toggle -->
+    <div class="auto-row" id="autoRow">
+      <div class="auto-label">
+        Auto record
+        <small>Starts when video plays, stops when it ends</small>
+      </div>
+      <label class="toggle">
+        <input type="checkbox" id="autoToggle">
+        <div class="toggle-track"></div>
+        <div class="toggle-thumb"></div>
+      </label>
     </div>
 
     <!-- Buttons -->

@@ -22,6 +22,11 @@ let tempVid    = null;
 let mimeType   = '';
 let capturedStreamUrls = [];
 
+// Auto-record state
+let autoMode         = false;
+let autoSubtitles    = false;
+let autoPlayHandler  = null;   // bound listener so we can remove it
+
 // ── Emeritus CDN map ──────────────────────────────────────────────────────────
 window.addEventListener('__vr_stream__', (e) => {
   const url = e.detail?.url;
@@ -69,38 +74,77 @@ function findPlayerContainer(videoEl) {
 }
 
 // ── Subtitle detection ────────────────────────────────────────────────────────
-// Common subtitle overlay selectors across popular HTML5 video players
+
+// DOM overlay selectors for common players (searched in player container)
 const SUBTITLE_SELECTORS = [
-  '.playkit-subtitles',           // Kaltura PlayKit
+  // Kaltura PlayKit (Emeritus)
+  '.playkit-subtitles',
   '.playkit-captions',
   '[class*="playkit-subtitle"]',
   '[class*="playkit-caption"]',
-  '.jw-text-track-display',       // JW Player
+  // JW Player
+  '.jw-text-track-display',
   '.jw-captions-text',
-  '.vjs-text-track-display',      // Video.js
+  '[class*="jw-captions"]',
+  // Video.js
+  '.vjs-text-track-display',
   '.vjs-caption-window',
+  // Shaka Player
+  '.shaka-text-container',
+  // Bitmovin
+  '.bmpui-ui-subtitle-overlay',
+  // Generic
   '[class*="subtitle-text"]',
   '[class*="caption-text"]',
-  '[class*="text-track"]',
   '[class*="captions-overlay"]',
   '[class*="cue-block"]',
   '[class*="subtitles-container"]',
-  '.shaka-text-container',        // Shaka Player
-  '.bmpui-ui-subtitle-overlay',   // Bitmovin
+  '[class*="text-track"]',
 ];
 
+/**
+ * Reads the current subtitle/CC text via two strategies:
+ *
+ * 1. Chrome's native textTracks API — works for HLS/DASH embedded CC (CEA-608,
+ *    WebVTT in stream). Checks 'showing' tracks first, then briefly enables
+ *    'disabled' caption/subtitle tracks to read their activeCues.
+ *
+ * 2. DOM overlay elements — covers custom player renderers (Kaltura, JW Player…)
+ *    that draw their own subtitle divs on top of the video.
+ */
 function getSubtitleText(videoEl) {
-  // 1. Native WebVTT text tracks
-  for (const track of Array.from(videoEl.textTracks || [])) {
-    if (track.mode === 'showing' && track.activeCues?.length) {
-      const text = Array.from(track.activeCues)
-        .map(c => (c.text || '').replace(/<[^>]+>/g, '').trim())
-        .filter(Boolean).join('\n');
-      if (text) return text;
-    }
+  // ── Strategy 1: textTracks (Chrome CC) ──────────────────────────────────
+  const tracks = Array.from(videoEl.textTracks || []);
+
+  // First pass: tracks already showing or hidden (cues already loaded)
+  for (const track of tracks) {
+    if (track.mode === 'disabled') continue;
+    if (!track.activeCues?.length) continue;
+    const text = Array.from(track.activeCues)
+      .map(c => (c.text || '').replace(/<[^>]+>/g, '').trim())
+      .filter(Boolean).join('\n');
+    if (text) return text;
   }
 
-  // 2. DOM overlay elements in the player container
+  // Second pass: try enabling any caption/subtitle track that's still disabled
+  // so Chrome loads its cues. We flip it to 'hidden' (invisible but active).
+  for (const track of tracks) {
+    if (track.kind !== 'captions' && track.kind !== 'subtitles') continue;
+    if (track.mode !== 'disabled') continue;
+    try {
+      track.mode = 'hidden';               // ask Chrome to load cues
+      const cues = track.activeCues;
+      if (cues?.length) {
+        const text = Array.from(cues)
+          .map(c => (c.text || '').replace(/<[^>]+>/g, '').trim())
+          .filter(Boolean).join('\n');
+        if (text) return text;
+      }
+      // Leave as 'hidden' so future frames can read it without re-enabling
+    } catch { track.mode = 'disabled'; }
+  }
+
+  // ── Strategy 2: DOM overlay elements ────────────────────────────────────
   const container = findPlayerContainer(videoEl);
   for (const sel of SUBTITLE_SELECTORS) {
     try {
@@ -109,7 +153,7 @@ function getSubtitleText(videoEl) {
         const text = el.textContent?.trim();
         if (text) return text;
       }
-    } catch { /* bad selector, skip */ }
+    } catch { /* bad selector */ }
   }
 
   return '';
@@ -224,12 +268,56 @@ function stopRecording() {
   catch (e) { return { success: false, error: e.message }; }
 }
 
+// ── Auto-record ───────────────────────────────────────────────────────────────
+function enableAutoRecord(captureSubtitles) {
+  // Remove any existing listener first
+  disableAutoRecord();
+
+  const video = findBestVideo();
+  if (!video) return { success: false, error: 'No video found to watch.' };
+
+  autoMode      = true;
+  autoSubtitles = captureSubtitles;
+
+  autoPlayHandler = () => {
+    // Only start if not already recording
+    if (!recorder || recorder.state === 'inactive') {
+      beginRecording(autoSubtitles).catch(() => {});
+    }
+  };
+
+  video.addEventListener('play', autoPlayHandler);
+
+  // If video is already playing when auto-mode is enabled, start immediately
+  if (!video.paused && !video.ended) {
+    autoPlayHandler();
+  }
+
+  return { success: true };
+}
+
+function disableAutoRecord() {
+  autoMode = false;
+  if (autoPlayHandler) {
+    const video = findBestVideo();
+    video?.removeEventListener('play', autoPlayHandler);
+    autoPlayHandler = null;
+  }
+  return { success: true };
+}
+
 // ── Message handler ───────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   switch (msg.action) {
     case 'status': {
       const video = findBestVideo();
-      sendResponse({ hasVideo: !!video, isRecording: recorder?.state === 'recording', mimeType, streamUrls: capturedStreamUrls });
+      sendResponse({
+        hasVideo:    !!video,
+        isRecording: recorder?.state === 'recording',
+        autoMode,
+        mimeType,
+        streamUrls:  capturedStreamUrls,
+      });
       break;
     }
     case 'start':
@@ -240,6 +328,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     case 'stop':
       sendResponse(stopRecording());
+      break;
+
+    case 'enable-auto':
+      sendResponse(enableAutoRecord(msg.captureSubtitles));
+      break;
+
+    case 'disable-auto':
+      sendResponse(disableAutoRecord());
       break;
   }
   return true;
