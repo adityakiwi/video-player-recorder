@@ -68,6 +68,9 @@ jobs:
             4. Enable **Developer mode** (top-right toggle)
             5. Click **Load unpacked** → select the unzipped folder
 
+            ## What's new in v3.1.1
+            - Fixed "No videos found" on sites where videos are in cross-origin iframes (e.g. Emeritus)
+
             ## What's included
             - Detects all videos on the page (including iframes) — shown as Video 1, Video 2 …
             - Auto-records when a video plays; auto-saves when it ends
