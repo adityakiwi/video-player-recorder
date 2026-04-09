@@ -1,0 +1,74 @@
+name: Build & Release Extension
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate manifest.json
+        run: |
+          python3 - <<'EOF'
+          import json
+          with open("manifest.json") as f:
+              m = json.load(f)
+          assert m.get("manifest_version") == 3, "Must be MV3"
+          print(f"✓ {m['name']} v{m['version']} — manifest OK")
+          EOF
+
+      - name: Read version
+        id: ver
+        run: |
+          VERSION=$(python3 -c "import json; print(json.load(open('manifest.json'))['version'])")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "zip=video-player-recorder-v${VERSION}.zip" >> $GITHUB_OUTPUT
+
+      - name: Build zip
+        run: |
+          zip -r "${{ steps.ver.outputs.zip }}" . \
+            --exclude "*.git*" \
+            --exclude "*.DS_Store" \
+            --exclude "build.sh" \
+            --exclude ".github/*"
+          echo "--- Contents ---"
+          unzip -l "${{ steps.ver.outputs.zip }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.ver.outputs.zip }}
+          path: ${{ steps.ver.outputs.zip }}
+          retention-days: 90
+
+      - name: Publish GitHub Release (main only)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: "v${{ steps.ver.outputs.version }}"
+          prerelease: false
+          files: ${{ steps.ver.outputs.zip }}
+          body: |
+            ## Install
+
+            1. Download **`${{ steps.ver.outputs.zip }}`** from the Assets below
+            2. Unzip it to any folder
+            3. Open Chrome → `chrome://extensions`
+            4. Enable **Developer mode** (top-right toggle)
+            5. Click **Load unpacked** → select the unzipped folder
+
+            ## What's included
+            - Tab capture + canvas crop → records only the video element, baking in subtitles/overlays
+            - Emeritus CDN HLS stream interception (`interceptor.js`)
+            - Auto-stops when video ends
+            - Saves as MP4 (H.264) or WebM fallback
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

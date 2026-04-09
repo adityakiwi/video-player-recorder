@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      width: 300px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #111827;
+      color: #e5e7eb;
+    }
+
+    header {
+      background: #1f2937;
+      padding: 12px 14px;
+      border-bottom: 1px solid #374151;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .logo {
+      width: 30px; height: 30px;
+      background: #dc2626;
+      border-radius: 7px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px; flex-shrink: 0;
+    }
+    h1    { font-size: 13px; font-weight: 700; color: #f9fafb; }
+    .sub  { font-size: 10px; color: #6b7280; margin-top: 2px; }
+
+    main { padding: 13px; display: flex; flex-direction: column; gap: 10px; }
+
+    /* ── Status card ── */
+    .card {
+      background: #1f2937;
+      border: 1px solid #374151;
+      border-radius: 8px;
+      padding: 11px 12px;
+    }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+    }
+
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #4b5563; flex-shrink: 0;
+      transition: background 0.25s;
+    }
+    .dot.ok   { background: #22c55e; }
+    .dot.rec  { background: #dc2626; animation: blink 1s ease-in-out infinite; }
+    .dot.warn { background: #f59e0b; }
+
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.25} }
+
+    #statusText { color: #d1d5db; flex: 1; font-size: 12px; }
+
+    .badge {
+      background: #374151; color: #60a5fa;
+      border-radius: 4px; padding: 2px 6px;
+      font-size: 10px; font-weight: 700; letter-spacing: 0.4px;
+    }
+
+    .timer {
+      text-align: center;
+      font-size: 30px; font-weight: 800;
+      letter-spacing: 3px;
+      font-variant-numeric: tabular-nums;
+      margin-top: 8px; color: #374151;
+      transition: color 0.3s;
+    }
+    .timer.active { color: #dc2626; }
+
+    /* ── Mode pills ── */
+    .modes {
+      display: flex; gap: 6px;
+    }
+    .mode-pill {
+      flex: 1; padding: 7px 0;
+      border-radius: 6px; border: 1px solid #374151;
+      background: #1f2937; color: #9ca3af;
+      font-size: 11px; font-weight: 600;
+      cursor: pointer; text-align: center;
+      transition: all 0.15s;
+    }
+    .mode-pill.active {
+      background: #1e3a5f; border-color: #3b82f6; color: #93c5fd;
+    }
+    .mode-pill:hover:not(.active) { border-color: #4b5563; color: #d1d5db; }
+
+    /* ── Buttons ── */
+    .btn {
+      width: 100%; padding: 11px; border: none; border-radius: 8px;
+      font-size: 13px; font-weight: 700; cursor: pointer;
+      transition: background 0.15s, opacity 0.15s; letter-spacing: 0.3px;
+    }
+    .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+    .btn-start { background: #dc2626; color: #fff; }
+    .btn-start:not(:disabled):hover { background: #b91c1c; }
+    .btn-stop  { background: #374151; color: #e5e7eb; border: 1px solid #4b5563; }
+    .btn-stop:not(:disabled):hover  { background: #4b5563; }
+
+    /* ── Stream URL section ── */
+    .stream-section { display: none; }
+    .stream-section.visible { display: block; }
+    .stream-label { font-size: 10px; color: #6b7280; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.6px; }
+    .stream-url {
+      background: #0f172a; border: 1px solid #374151; border-radius: 6px;
+      padding: 7px 9px; font-size: 10px; color: #60a5fa;
+      word-break: break-all; cursor: pointer;
+      font-family: 'SFMono-Regular', Consolas, monospace;
+      line-height: 1.5;
+    }
+    .stream-url:hover { background: #1e293b; }
+    .copy-hint { font-size: 9px; color: #4b5563; margin-top: 3px; text-align: right; }
+
+    /* ── Message ── */
+    .msg {
+      font-size: 11px; text-align: center; color: #6b7280;
+      min-height: 14px; line-height: 1.5; padding: 0 2px;
+    }
+    .msg.err { color: #f87171; }
+    .msg.ok  { color: #4ade80; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="logo">&#9654;</div>
+    <div>
+      <h1>Video Recorder</h1>
+      <div class="sub">Capture video + audio + subtitles</div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Status -->
+    <div class="card">
+      <div class="row">
+        <div class="dot" id="dot"></div>
+        <span id="statusText">Scanning...</span>
+        <span class="badge" id="formatBadge" style="display:none"></span>
+      </div>
+      <div class="timer" id="timer">00:00</div>
+    </div>
+
+    <!-- Record mode -->
+    <div class="modes" id="modeRow">
+      <div class="mode-pill active" data-mode="tab" title="Captures rendered frame including player overlays & custom subtitles">
+        &#128249; Screen crop
+      </div>
+      <div class="mode-pill" data-mode="element" title="Captures raw video stream. Adds WebVTT subtitles only.">
+        &#9654; Player stream
+      </div>
+    </div>
+
+    <!-- Buttons -->
+    <button class="btn btn-start" id="btnStart" disabled>&#9210; Start Recording</button>
+    <button class="btn btn-stop"  id="btnStop"  style="display:none">&#9632; Stop &amp; Save</button>
+
+    <!-- Detected HLS stream (Emeritus) -->
+    <div class="stream-section" id="streamSection">
+      <div class="stream-label">Detected HLS stream</div>
+      <div class="stream-url" id="streamUrl"></div>
+      <div class="copy-hint">Click to copy URL</div>
+    </div>
+
+    <p class="msg" id="msg"></p>
+  </main>
+
+  <script src="popup.js"></script>
+</body>
+</html>

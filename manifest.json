@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Video Player Recorder",
+  "version": "2.0.0",
+  "description": "Record any HTML5 video player with subtitles and audio, optimized for Emeritus",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabCapture"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Video Player Recorder"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*.emeritus.org/*",
+        "*://video-test.emeritus.org/*",
+        "*://videocast-stage.emeritus.org/*",
+        "*://videocast.emeritus.org/*"
+      ],
+      "js": ["interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
+  "host_permissions": ["<all_urls>"]
+}
