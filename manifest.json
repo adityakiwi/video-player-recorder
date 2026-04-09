@@ -1,46 +1,26 @@
 {
   "manifest_version": 3,
-  "name": "Video Player Recorder",
-  "version": "2.7.0",
-  "description": "Record any HTML5 video player with subtitles and audio, optimized for Emeritus",
-  "permissions": [
-    "activeTab",
-    "scripting",
-    "tabCapture"
-  ],
+  "name": "Video Recorder",
+  "version": "3.0.0",
+  "description": "Auto-records HTML5 video players. Detects when video plays, saves when it ends.",
+  "permissions": ["activeTab", "scripting"],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Video Player Recorder",
     "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
+      "16":  "icons/icon16.png",
+      "48":  "icons/icon48.png",
       "128": "icons/icon128.png"
     }
   },
+  "content_scripts": [{
+    "matches": ["<all_urls>"],
+    "js": ["content.js"],
+    "run_at": "document_idle",
+    "all_frames": true
+  }],
   "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
+    "16":  "icons/icon16.png",
+    "48":  "icons/icon48.png",
     "128": "icons/icon128.png"
-  },
-  "background": {
-    "service_worker": "background.js"
-  },
-  "content_scripts": [
-    {
-      "matches": [
-        "*://*.emeritus.org/*",
-        "*://video-test.emeritus.org/*",
-        "*://videocast-stage.emeritus.org/*",
-        "*://videocast.emeritus.org/*"
-      ],
-      "js": [
-        "interceptor.js"
-      ],
-      "run_at": "document_start",
-      "world": "MAIN"
-    }
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ]
+  }
 }
