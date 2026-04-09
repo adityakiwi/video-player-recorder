@@ -181,11 +181,11 @@ function cleanup() {
 
 // ── Tab-capture path (preferred) ──────────────────────────────────────────────
 /**
- * @param streamId    — from chrome.tabCapture.getMediaStreamId()
- * @param videoEl     — the video element
- * @param fixedRect   — pre-computed absolute rect (used when video is in cross-origin iframe)
+ * @param streamId  — from chrome.tabCapture.getMediaStreamId()
+ * @param cropEl    — element to crop to (video element or player container)
+ * @param fixedRect — pre-computed absolute rect (used when video is in cross-origin iframe)
  */
-async function startViaTabCapture(streamId, videoEl, fixedRect) {
+async function startViaTabCapture(streamId, cropEl, fixedRect) {
   tabStream = await navigator.mediaDevices.getUserMedia({
     video: {
       mandatory: {
@@ -233,8 +233,8 @@ async function startViaTabCapture(streamId, videoEl, fixedRect) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(tempVid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
 
-    // WebVTT subtitle overlay (custom overlays already baked in via canvas crop)
-    const sub = getSubtitleText(videoEl);
+    // WebVTT <track> cues drawn as fallback; custom overlays are baked in by the canvas crop
+    const sub = getSubtitleText(cropEl.tagName === 'VIDEO' ? cropEl : (cropEl.querySelector('video') || cropEl));
     if (sub) drawSubtitle(ctx, canvas, sub);
 
     animFrame = requestAnimationFrame(drawFrame);
@@ -295,15 +295,19 @@ function drawSubtitle(ctx, canvas, text) {
 }
 
 // ── Main recording orchestrator ───────────────────────────────────────────────
-async function beginRecording(streamId, absoluteRect) {
+async function beginRecording(streamId, absoluteRect, captureSubtitles) {
   const videoEl = findBestVideo();
   if (!videoEl) throw new Error('No video element found on this page or its iframes.');
+
+  // When capturing subtitles, crop to the player container (wraps video + subtitle divs).
+  // When video-only, crop to the bare <video> element.
+  const cropEl = captureSubtitles ? findPlayerContainer(videoEl) : videoEl;
 
   let stream, mode;
 
   if (streamId) {
     try {
-      stream = await startViaTabCapture(streamId, videoEl, absoluteRect || null);
+      stream = await startViaTabCapture(streamId, cropEl, absoluteRect || null);
       mode   = 'tab-capture';
     } catch (e) {
       console.warn('[VR] Tab capture failed, falling back to captureStream():', e.message);
@@ -360,7 +364,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       break;
     }
     case 'start':
-      beginRecording(msg.streamId, msg.absoluteRect)
+      beginRecording(msg.streamId, msg.absoluteRect, msg.captureSubtitles)
         .then(sendResponse)
         .catch(e => sendResponse({ success: false, error: e.message }));
       return true;

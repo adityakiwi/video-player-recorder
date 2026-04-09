@@ -13,7 +13,7 @@ const modeRow       = document.getElementById('modeRow');
 // ── State ─────────────────────────────────────────────────────────────────────
 let timerInterval = null;
 let elapsed       = 0;
-let recordMode    = 'tab';
+let recordMode    = 'video';  // 'video' | 'subtitles'
 let videoFrameId  = 0;   // frameId of the frame that contains the video
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -200,7 +200,7 @@ function showRecording(fmt, mode) {
   btnStop.style.display  = 'block'; btnStop.disabled = false;
   modeRow.style.display  = 'none';
   startTimer();
-  setMsg(fmt + ' \u00B7 ' + (mode === 'tab-capture' ? 'Screen crop' : 'Player stream'));
+  setMsg(fmt + ' \u00B7 ' + (recordMode === 'subtitles' ? 'Video + Subtitles' : 'Video only'));
 }
 
 function showStreamUrl(urls) {
@@ -272,18 +272,17 @@ btnStart.addEventListener('click', async () => {
   }
 
   let streamId = null;
-  if (recordMode === 'tab') {
-    try {
-      streamId = await getTabStreamId(tab.id);
-    } catch {
-      setMsg('Tab capture unavailable — using player stream fallback.');
-    }
+  try {
+    streamId = await getTabStreamId(tab.id);
+  } catch {
+    setMsg('Tab capture unavailable — audio/subtitles may be limited.');
   }
 
   const result = await sendToFrame(tab.id, videoFrameId, {
-    action:       'start',
+    action:            'start',
     streamId,
-    absoluteRect: detection.absoluteRect || null,
+    absoluteRect:      detection.absoluteRect || null,
+    captureSubtitles:  recordMode === 'subtitles',
   });
 
   if (result?.success) {
