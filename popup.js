@@ -74,19 +74,23 @@ async function detectVideoFrame(tabId) {
           return v;
         }
         const vids = collectVids(document);
-        return { hasVideo: vids.length > 0, isTop: window.self === window.top };
+        return { hasVideo: vids.length > 0, videoCount: vids.length, isTop: window.self === window.top };
       },
     });
   } catch {
-    return { hasVideo: false, frameId: 0 };
+    return { hasVideo: false, videoCount: 0, frameId: 0 };
   }
 
   const withVideo = results.filter(r => r.result?.hasVideo);
-  if (!withVideo.length) return { hasVideo: false, frameId: 0 };
+  if (!withVideo.length) return { hasVideo: false, videoCount: 0, frameId: 0 };
 
-  // Prefer top frame; fall back to first sub-frame
-  const chosen = withVideo.find(r => r.result?.isTop) || withVideo[0];
-  return { hasVideo: true, frameId: chosen.frameId ?? 0 };
+  // Pick the frame with the most videos (handles cross-origin iframes that each
+  // report their own count independently). Fall back to top frame on a tie.
+  const chosen = withVideo.reduce((best, r) =>
+    r.result.videoCount > best.result.videoCount ? r : best
+  );
+  const totalVideoCount = results.reduce((sum, r) => sum + (r.result?.videoCount || 0), 0);
+  return { hasVideo: true, videoCount: totalVideoCount, frameId: chosen.frameId ?? 0 };
 }
 
 /** Send a message to a specific frame and await its response. */

@@ -293,7 +293,9 @@ function enableAutoMove(captureSubtitles) {
   disableAutoRecord();
   disableAutoMove();
 
-  const vids = visibleVideos();
+  // Use all videos, not just visually large ones — catches videos in collapsed
+  // sections or not yet rendered at full size when Auto Move is toggled on.
+  const vids = collectVideos(document);
   if (!vids.length) return { success: false, error: 'No videos found on this page.' };
 
   autoMoveMode  = true;
