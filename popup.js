@@ -240,7 +240,7 @@ async function init() {
   videoFrameId = detection.frameId ?? 0;
 
   if (detection.hasVideo) {
-    const status = await sendToFrame(tab.id, videoFrameId, { action: 'status' });
+    const status = await sendToFrame(tab.id, 0, { action: 'status' });
     showStreamUrl(status?.streamUrls);
     if (status?.isRecording) {
       showRecording(status.mimeType?.includes('mp4') ? 'MP4' : 'WebM', 'tab-capture');
@@ -278,11 +278,15 @@ btnStart.addEventListener('click', async () => {
     setMsg('Tab capture unavailable — audio/subtitles may be limited.');
   }
 
-  const result = await sendToFrame(tab.id, videoFrameId, {
-    action:            'start',
+  // Always send to top frame (frameId 0) — getUserMedia(chromeMediaSource:'tab')
+  // only works reliably from the top frame, not inside iframes.
+  // absoluteRect lets the top frame crop to the correct region even when the
+  // video lives in a cross-origin iframe it can't access directly.
+  const result = await sendToFrame(tab.id, 0, {
+    action:           'start',
     streamId,
-    absoluteRect:      detection.absoluteRect || null,
-    captureSubtitles:  recordMode === 'subtitles',
+    absoluteRect:     detection.absoluteRect || null,
+    captureSubtitles: recordMode === 'subtitles',
   });
 
   if (result?.success) {
@@ -299,7 +303,7 @@ btnStop.addEventListener('click', async () => {
   setMsg('Saving\u2026');
 
   const tab    = await getActiveTab();
-  const result = await sendToFrame(tab.id, videoFrameId, { action: 'stop' });
+  const result = await sendToFrame(tab.id, 0, { action: 'stop' });
 
   if (result?.success) {
     showIdle(true);
@@ -322,7 +326,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 setInterval(async () => {
   const tab = await getActiveTab();
   if (!tab?.id) return;
-  const status = await sendToFrame(tab.id, videoFrameId, { action: 'status' });
+  const status = await sendToFrame(tab.id, 0, { action: 'status' });
   if (status?.streamUrls?.length) showStreamUrl(status.streamUrls);
 }, 2000);
 

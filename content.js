@@ -1,12 +1,19 @@
 /**
- * content.js — injected into every frame (allFrames: true) by the popup.
+ * content.js — injected into ALL frames (allFrames:true).
  *
- * Strategy: chrome.tabCapture stream (full tab) → canvas crop to video element bounds.
- * This captures the exact visual render of the player including custom subtitle overlays.
+ * Recording always runs from the TOP frame (frameId 0) which can call
+ * getUserMedia({ chromeMediaSource:'tab' }) reliably.
  *
- * Supports videos inside same-origin iframes (recursive search + iframe-offset-aware
- * coordinate calculation). For cross-origin iframes, the popup passes in a pre-computed
- * absoluteRect so canvas crop still works correctly.
+ * When the video lives in a cross-origin iframe, the popup computes
+ * absoluteRect (iframe offset + video offset) and passes it here so the
+ * top-frame content script can crop the tab stream without needing to
+ * access the video element directly.
+ *
+ * Same-origin iframes: findBestVideo() recurses into them, so the top
+ * frame finds the element and uses getAbsoluteRect() for the crop.
+ *
+ * A lightweight "monitor" message handler lets iframe content scripts
+ * forward video-ended events to trigger auto-stop.
  */
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -33,16 +40,12 @@ window.addEventListener('__vr_stream__', (e) => {
 
 // ── Video search ──────────────────────────────────────────────────────────────
 
-/**
- * Recursively collects all <video> elements in this document and any accessible
- * (same-origin) nested iframes.
- */
 function collectVideos(doc) {
   const vids = Array.from(doc.querySelectorAll('video'));
   for (const iframe of doc.querySelectorAll('iframe')) {
     try {
       if (iframe.contentDocument) vids.push(...collectVideos(iframe.contentDocument));
-    } catch { /* cross-origin — skip */ }
+    } catch { /* cross-origin */ }
   }
   return vids;
 }
@@ -50,86 +53,57 @@ function collectVideos(doc) {
 function findBestVideo() {
   const all = collectVideos(document);
   if (!all.length) return null;
-
   const playing = all.filter(v => !v.paused && !v.ended && v.readyState >= 2);
   const pool = playing.length ? playing : all;
-
   return pool.reduce((best, v) => {
     try {
-      const r  = v.getBoundingClientRect();
-      const br = best.getBoundingClientRect();
+      const r = v.getBoundingClientRect(), br = best.getBoundingClientRect();
       return r.width * r.height > br.width * br.height ? v : best;
     } catch { return best; }
   });
 }
 
 /**
- * Walks up from the <video> element to find the player container —
- * the nearest ancestor that wraps both the video and its subtitle/overlay divs.
- *
- * Most players look like:
- *   <div class="player" style="position:relative">   ← player container
- *     <video>...</video>
- *     <div class="subtitles">...</div>               ← sibling overlay
- *   </div>
- *
- * We walk up until we find a positioned ancestor whose area is ≤ 2× the video's
- * area (so we don't accidentally grab the full page wrapper).
+ * Walk up from videoEl to find the nearest positioned ancestor that wraps
+ * both the video and any sibling subtitle/overlay divs.
  */
 function findPlayerContainer(videoEl) {
-  const videoRect = videoEl.getBoundingClientRect();
-  const videoArea = videoRect.width * videoRect.height;
-  if (videoArea === 0) return videoEl;
+  const vr   = videoEl.getBoundingClientRect();
+  const area = vr.width * vr.height;
+  if (area === 0) return videoEl;
 
-  let el = videoEl.parentElement;
   let best = videoEl;
+  let el   = videoEl.parentElement;
 
-  for (let depth = 0; el && depth < 8; depth++, el = el.parentElement) {
+  for (let d = 0; el && d < 8; d++, el = el.parentElement) {
     try {
-      const style = getComputedStyle(el);
-      const pos   = style.position;
-      // Only consider positioned containers (subtitle overlays need a positioned parent)
-      if (pos !== 'relative' && pos !== 'absolute' && pos !== 'fixed' && pos !== 'sticky') continue;
-
-      const r    = el.getBoundingClientRect();
-      const area = r.width * r.height;
-      if (area === 0) continue;
-
-      // Accept if it's close in size to the video (≤3× area) and covers the video
-      if (area <= videoArea * 3 && r.width >= videoRect.width - 2 && r.height >= videoRect.height - 2) {
+      const pos = getComputedStyle(el).position;
+      if (pos === 'static') continue;
+      const r   = el.getBoundingClientRect();
+      const a   = r.width * r.height;
+      if (a === 0 || r.width < vr.width - 2) continue;
+      if (a <= area * 3) {
         best = el;
-        // Keep going up to catch a slightly larger container that holds the subtitle layer
-        if (area > videoArea * 1.05) break; // found a meaningfully larger wrapper — stop here
+        if (a > area * 1.05) break; // found a meaningfully larger wrapper
       }
     } catch { break; }
   }
-
   return best;
 }
 
-/**
- * Returns an element's bounding rect in top-level window coordinates,
- * walking up the frame chain for same-origin iframes.
- */
+/** Element rect in top-level window coordinates (walks same-origin frame chain). */
 function getAbsoluteRect(el) {
   let rect = { ...el.getBoundingClientRect() };
   let win  = el.ownerDocument?.defaultView;
-
   while (win && win !== window.top) {
     try {
-      const frameEl   = win.frameElement;
-      if (!frameEl) break;
-      const frameRect = frameEl.getBoundingClientRect();
-      rect = {
-        left:   frameRect.left + rect.left,
-        top:    frameRect.top  + rect.top,
-        width:  rect.width,
-        height: rect.height,
-      };
-      win = frameEl.ownerDocument?.defaultView;
+      const fe = win.frameElement;
+      if (!fe) break;
+      const fr = fe.getBoundingClientRect();
+      rect = { left: fr.left + rect.left, top: fr.top + rect.top, width: rect.width, height: rect.height };
+      win  = fe.ownerDocument?.defaultView;
     } catch { break; }
   }
-
   return rect;
 }
 
@@ -143,31 +117,41 @@ function pickMimeType() {
     'video/webm;codecs=vp8,opus',
     'video/webm',
   ];
-  return candidates.find(t => {
-    try { return MediaRecorder.isTypeSupported(t); } catch { return false; }
-  }) || 'video/webm';
+  return candidates.find(t => { try { return MediaRecorder.isTypeSupported(t); } catch { return false; } }) || 'video/webm';
 }
 
-function getSubtitleText(videoEl) {
-  for (const track of Array.from(videoEl.textTracks || [])) {
+function getSubtitleText(el) {
+  const vid = el?.tagName === 'VIDEO' ? el : el?.querySelector('video');
+  if (!vid) return '';
+  for (const track of Array.from(vid.textTracks || [])) {
     if (track.mode === 'showing' && track.activeCues?.length) {
       return Array.from(track.activeCues)
         .map(c => (c.text || '').replace(/<[^>]+>/g, '').trim())
-        .filter(Boolean)
-        .join('\n');
+        .filter(Boolean).join('\n');
     }
   }
   return '';
 }
 
+function drawSubtitle(ctx, canvas, text) {
+  const sz = Math.max(16, Math.round(canvas.height * 0.038));
+  ctx.font = `bold ${sz}px Arial, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.lineWidth = Math.max(2, sz * 0.12);
+  const y = canvas.height - sz * 2.2;
+  text.split('\n').forEach((line, i) => {
+    const ly = y + i * (sz + 5);
+    ctx.strokeStyle = 'rgba(0,0,0,0.9)'; ctx.strokeText(line, canvas.width / 2, ly);
+    ctx.fillStyle   = '#fff';            ctx.fillText(line,   canvas.width / 2, ly);
+  });
+}
+
 function saveBlob(blob, ext) {
   const url = URL.createObjectURL(blob);
-  const a   = document.createElement('a');
-  a.style.display = 'none';
-  a.href     = url;
+  const a = document.createElement('a');
+  a.style.display = 'none'; a.href = url;
   a.download = `recording_${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`;
-  document.body.appendChild(a);
-  a.click();
+  document.body.appendChild(a); a.click();
   setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 2000);
 }
 
@@ -175,15 +159,14 @@ function cleanup() {
   if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
   if (tempVid)   { tempVid.srcObject = null; tempVid = null; }
   tabStream?.getTracks().forEach(t => t.stop());
-  tabStream = null;
-  recStream = null;
+  tabStream = null; recStream = null;
 }
 
-// ── Tab-capture path (preferred) ──────────────────────────────────────────────
+// ── Tab capture (always called from top frame) ────────────────────────────────
 /**
- * @param streamId  — from chrome.tabCapture.getMediaStreamId()
- * @param cropEl    — element to crop to (video element or player container)
- * @param fixedRect — pre-computed absolute rect (used when video is in cross-origin iframe)
+ * @param streamId   chrome.tabCapture stream ID
+ * @param cropEl     element to crop to (null when using fixedRect for cross-origin iframe)
+ * @param fixedRect  pre-computed absolute rect from popup (cross-origin iframes)
  */
 async function startViaTabCapture(streamId, cropEl, fixedRect) {
   tabStream = await navigator.mediaDevices.getUserMedia({
@@ -213,8 +196,7 @@ async function startViaTabCapture(streamId, cropEl, fixedRect) {
   const tabW = tempVid.videoWidth  || screen.width;
   const tabH = tempVid.videoHeight || screen.height;
 
-  // Crop to the player container (wraps video + subtitle overlay divs), not bare <video>
-  const cropEl   = findPlayerContainer(videoEl);
+  // Use fixedRect (cross-origin iframe) or calculate from cropEl position
   const initRect = fixedRect || getAbsoluteRect(cropEl);
   const canvas   = document.createElement('canvas');
   canvas.width   = Math.round(initRect.width)  || 1280;
@@ -222,9 +204,7 @@ async function startViaTabCapture(streamId, cropEl, fixedRect) {
   const ctx = canvas.getContext('2d');
 
   function drawFrame() {
-    // Recalculate each frame in case player moved / resized
     const rect = fixedRect || getAbsoluteRect(cropEl);
-
     const sx = (rect.left  / window.innerWidth)  * tabW;
     const sy = (rect.top   / window.innerHeight) * tabH;
     const sw = (rect.width  / window.innerWidth)  * tabW;
@@ -233,13 +213,12 @@ async function startViaTabCapture(streamId, cropEl, fixedRect) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(tempVid, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
 
-    // WebVTT <track> cues drawn as fallback; custom overlays are baked in by the canvas crop
-    const sub = getSubtitleText(cropEl.tagName === 'VIDEO' ? cropEl : (cropEl.querySelector('video') || cropEl));
+    // WebVTT cues as text overlay; custom overlays are baked in by the crop
+    const sub = cropEl ? getSubtitleText(cropEl) : '';
     if (sub) drawSubtitle(ctx, canvas, sub);
 
     animFrame = requestAnimationFrame(drawFrame);
   }
-
   drawFrame();
 
   recStream = canvas.captureStream(30);
@@ -250,19 +229,17 @@ async function startViaTabCapture(streamId, cropEl, fixedRect) {
 // ── Element captureStream fallback ────────────────────────────────────────────
 async function startViaElementCapture(videoEl) {
   const elemStream = videoEl.captureStream();
-  if (!elemStream.getTracks().length) {
-    throw new Error('captureStream() returned no tracks (DRM or CORS restriction).');
-  }
+  if (!elemStream.getTracks().length) throw new Error('captureStream() returned no tracks (DRM or CORS restriction).');
 
-  const [videoTrack] = elemStream.getVideoTracks();
-  const settings = videoTrack.getSettings();
-  const canvas   = document.createElement('canvas');
-  canvas.width   = settings.width  || videoEl.videoWidth  || 1280;
-  canvas.height  = settings.height || videoEl.videoHeight || 720;
+  const [vt]   = elemStream.getVideoTracks();
+  const s      = vt.getSettings();
+  const canvas = document.createElement('canvas');
+  canvas.width  = s.width  || videoEl.videoWidth  || 1280;
+  canvas.height = s.height || videoEl.videoHeight || 720;
   const ctx = canvas.getContext('2d');
 
   tempVid = document.createElement('video');
-  tempVid.srcObject = new MediaStream([videoTrack]);
+  tempVid.srcObject = new MediaStream([vt]);
   tempVid.muted = true;
   await tempVid.play();
 
@@ -279,42 +256,35 @@ async function startViaElementCapture(videoEl) {
   return recStream;
 }
 
-function drawSubtitle(ctx, canvas, text) {
-  const fontSize = Math.max(16, Math.round(canvas.height * 0.038));
-  ctx.font      = `bold ${fontSize}px Arial, sans-serif`;
-  ctx.textAlign = 'center';
-  ctx.lineWidth = Math.max(2, fontSize * 0.12);
-  const y = canvas.height - fontSize * 2.2;
-  text.split('\n').forEach((line, i) => {
-    const ly = y + i * (fontSize + 5);
-    ctx.strokeStyle = 'rgba(0,0,0,0.9)';
-    ctx.strokeText(line, canvas.width / 2, ly);
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(line, canvas.width / 2, ly);
-  });
-}
-
-// ── Main recording orchestrator ───────────────────────────────────────────────
+// ── Main orchestrator ─────────────────────────────────────────────────────────
 async function beginRecording(streamId, absoluteRect, captureSubtitles) {
+  // Try to find the video element (works for top-frame + same-origin iframes)
   const videoEl = findBestVideo();
-  if (!videoEl) throw new Error('No video element found on this page or its iframes.');
 
-  // When capturing subtitles, crop to the player container (wraps video + subtitle divs).
-  // When video-only, crop to the bare <video> element.
-  const cropEl = captureSubtitles ? findPlayerContainer(videoEl) : videoEl;
+  // For cross-origin iframes, absoluteRect is provided; videoEl may be null here
+  if (!videoEl && !absoluteRect) {
+    throw new Error('No video found. If the player is in a cross-origin iframe the tab may need a refresh.');
+  }
 
   let stream, mode;
 
   if (streamId) {
+    // Determine the crop element (only when we have the video element)
+    const cropEl = videoEl
+      ? (captureSubtitles ? findPlayerContainer(videoEl) : videoEl)
+      : null;  // null = use fixedRect
+
     try {
       stream = await startViaTabCapture(streamId, cropEl, absoluteRect || null);
       mode   = 'tab-capture';
     } catch (e) {
-      console.warn('[VR] Tab capture failed, falling back to captureStream():', e.message);
+      console.warn('[VR] Tab capture failed:', e.message);
+      if (!videoEl) throw new Error('Tab capture failed and no direct video access available.');
       stream = await startViaElementCapture(videoEl);
       mode   = 'element-capture';
     }
   } else {
+    if (!videoEl) throw new Error('No video element accessible for direct capture.');
     stream = await startViaElementCapture(videoEl);
     mode   = 'element-capture';
   }
@@ -322,32 +292,25 @@ async function beginRecording(streamId, absoluteRect, captureSubtitles) {
   mimeType = pickMimeType();
   chunks   = [];
   recorder = new MediaRecorder(stream, { mimeType });
-
   recorder.ondataavailable = (e) => { if (e.data?.size > 0) chunks.push(e.data); };
   recorder.onstop = () => {
-    const isMP4 = mimeType.includes('mp4');
-    saveBlob(new Blob(chunks, { type: mimeType }), isMP4 ? 'mp4' : 'webm');
+    saveBlob(new Blob(chunks, { type: mimeType }), mimeType.includes('mp4') ? 'mp4' : 'webm');
     chunks = [];
     cleanup();
     chrome.runtime.sendMessage({ event: 'recording-stopped' }).catch(() => {});
   };
-
   recorder.start(1000);
-  videoEl.addEventListener('ended', () => stopRecording(), { once: true });
+
+  // Auto-stop when video ends (only if we have access to the element)
+  if (videoEl) videoEl.addEventListener('ended', () => stopRecording(), { once: true });
 
   return { success: true, mimeType, isMP4: mimeType.includes('mp4'), mode };
 }
 
 function stopRecording() {
-  if (!recorder || recorder.state === 'inactive') {
-    return { success: false, error: 'Not currently recording.' };
-  }
-  try {
-    recorder.stop();
-    return { success: true };
-  } catch (e) {
-    return { success: false, error: e.message };
-  }
+  if (!recorder || recorder.state === 'inactive') return { success: false, error: 'Not recording.' };
+  try { recorder.stop(); return { success: true }; }
+  catch (e) { return { success: false, error: e.message }; }
 }
 
 // ── Message handler ───────────────────────────────────────────────────────────
@@ -355,23 +318,42 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   switch (msg.action) {
     case 'status': {
       const video = findBestVideo();
-      sendResponse({
-        hasVideo:    !!video,
-        isRecording: !!(recorder && recorder.state === 'recording'),
-        mimeType,
-        streamUrls:  capturedStreamUrls,
-      });
+      sendResponse({ hasVideo: !!video, isRecording: !!(recorder?.state === 'recording'), mimeType, streamUrls: capturedStreamUrls });
       break;
     }
     case 'start':
       beginRecording(msg.streamId, msg.absoluteRect, msg.captureSubtitles)
-        .then(sendResponse)
-        .catch(e => sendResponse({ success: false, error: e.message }));
+        .then(sendResponse).catch(e => sendResponse({ success: false, error: e.message }));
       return true;
 
     case 'stop':
       sendResponse(stopRecording());
       break;
+
+    // Forwarded from iframe content scripts for auto-stop in cross-origin iframes
+    case 'video-ended':
+      stopRecording();
+      sendResponse({ ok: true });
+      break;
   }
   return true;
 });
+
+// ── Iframe video monitor (runs in every frame) ────────────────────────────────
+// If this content script is running inside an iframe and finds a video,
+// set up an 'ended' listener that notifies the top-frame content script.
+if (window.self !== window.top) {
+  const monitorVideo = () => {
+    const v = document.querySelector('video');
+    if (!v) return;
+    v.addEventListener('ended', () => {
+      // Send to frameId 0 (top frame content script)
+      chrome.runtime.sendMessage({ action: 'video-ended' }).catch(() => {});
+    }, { once: true });
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', monitorVideo);
+  } else {
+    monitorVideo();
+  }
+}
