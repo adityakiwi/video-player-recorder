@@ -80,7 +80,23 @@ async function detectVideoAcrossFrames(tabId) {
           } catch { return b; }
         });
 
-        const r = best.getBoundingClientRect();
+        // Use the player container (wraps video + subtitle overlays), not bare <video>
+        const videoRect = best.getBoundingClientRect();
+        const videoArea = videoRect.width * videoRect.height;
+        let cropEl = best;
+        let el = best.parentElement;
+        for (let d = 0; el && d < 8; d++, el = el.parentElement) {
+          try {
+            const pos = getComputedStyle(el).position;
+            if (pos !== 'relative' && pos !== 'absolute' && pos !== 'fixed' && pos !== 'sticky') continue;
+            const er = el.getBoundingClientRect();
+            if (er.width * er.height <= videoArea * 3 && er.width >= videoRect.width - 2) {
+              cropEl = el;
+              if (er.width * er.height > videoArea * 1.05) break;
+            }
+          } catch { break; }
+        }
+        const r = cropEl.getBoundingClientRect();
         return {
           hasVideo:   true,
           isTopFrame: window.self === window.top,

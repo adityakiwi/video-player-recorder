@@ -64,7 +64,51 @@ function findBestVideo() {
 }
 
 /**
- * Returns the video element's bounding rect in top-level window coordinates,
+ * Walks up from the <video> element to find the player container —
+ * the nearest ancestor that wraps both the video and its subtitle/overlay divs.
+ *
+ * Most players look like:
+ *   <div class="player" style="position:relative">   ← player container
+ *     <video>...</video>
+ *     <div class="subtitles">...</div>               ← sibling overlay
+ *   </div>
+ *
+ * We walk up until we find a positioned ancestor whose area is ≤ 2× the video's
+ * area (so we don't accidentally grab the full page wrapper).
+ */
+function findPlayerContainer(videoEl) {
+  const videoRect = videoEl.getBoundingClientRect();
+  const videoArea = videoRect.width * videoRect.height;
+  if (videoArea === 0) return videoEl;
+
+  let el = videoEl.parentElement;
+  let best = videoEl;
+
+  for (let depth = 0; el && depth < 8; depth++, el = el.parentElement) {
+    try {
+      const style = getComputedStyle(el);
+      const pos   = style.position;
+      // Only consider positioned containers (subtitle overlays need a positioned parent)
+      if (pos !== 'relative' && pos !== 'absolute' && pos !== 'fixed' && pos !== 'sticky') continue;
+
+      const r    = el.getBoundingClientRect();
+      const area = r.width * r.height;
+      if (area === 0) continue;
+
+      // Accept if it's close in size to the video (≤3× area) and covers the video
+      if (area <= videoArea * 3 && r.width >= videoRect.width - 2 && r.height >= videoRect.height - 2) {
+        best = el;
+        // Keep going up to catch a slightly larger container that holds the subtitle layer
+        if (area > videoArea * 1.05) break; // found a meaningfully larger wrapper — stop here
+      }
+    } catch { break; }
+  }
+
+  return best;
+}
+
+/**
+ * Returns an element's bounding rect in top-level window coordinates,
  * walking up the frame chain for same-origin iframes.
  */
 function getAbsoluteRect(el) {
@@ -169,8 +213,9 @@ async function startViaTabCapture(streamId, videoEl, fixedRect) {
   const tabW = tempVid.videoWidth  || screen.width;
   const tabH = tempVid.videoHeight || screen.height;
 
-  // Use provided rect (cross-origin iframe) or calculate from element position
-  const initRect = fixedRect || getAbsoluteRect(videoEl);
+  // Crop to the player container (wraps video + subtitle overlay divs), not bare <video>
+  const cropEl   = findPlayerContainer(videoEl);
+  const initRect = fixedRect || getAbsoluteRect(cropEl);
   const canvas   = document.createElement('canvas');
   canvas.width   = Math.round(initRect.width)  || 1280;
   canvas.height  = Math.round(initRect.height) || 720;
@@ -178,7 +223,7 @@ async function startViaTabCapture(streamId, videoEl, fixedRect) {
 
   function drawFrame() {
     // Recalculate each frame in case player moved / resized
-    const rect = fixedRect || getAbsoluteRect(videoEl);
+    const rect = fixedRect || getAbsoluteRect(cropEl);
 
     const sx = (rect.left  / window.innerWidth)  * tabW;
     const sy = (rect.top   / window.innerHeight) * tabH;
