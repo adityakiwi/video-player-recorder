@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Video Player Recorder",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "Record any HTML5 video player with subtitles and audio, optimized for Emeritus",
   "permissions": [
     "activeTab",
@@ -12,14 +12,14 @@
     "default_popup": "popup.html",
     "default_title": "Video Player Recorder",
     "default_icon": {
-      "16":  "icons/icon16.png",
-      "48":  "icons/icon48.png",
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
   },
   "icons": {
-    "16":  "icons/icon16.png",
-    "48":  "icons/icon48.png",
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   },
   "background": {

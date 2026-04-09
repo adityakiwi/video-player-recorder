@@ -13,11 +13,11 @@ const modeRow       = document.getElementById('modeRow');
 // ── State ─────────────────────────────────────────────────────────────────────
 let timerInterval = null;
 let elapsed       = 0;
-let recordMode    = 'video';  // 'video' | 'subtitles'
-let videoFrameId  = 0;   // frameId of the frame that contains the video
+let recordMode    = 'video';   // 'video' | 'subtitles'
+let videoFrameId  = 0;         // frameId of the frame that contains the video
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-function pad(n) { return String(n).padStart(2, '0'); }
+const pad = n => String(n).padStart(2, '0');
 function fmtTime(s) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
   return h ? `${pad(h)}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`;
@@ -40,9 +40,9 @@ async function getActiveTab() {
   return tab;
 }
 
-// ── Frame-aware injection & detection ─────────────────────────────────────────
+// ── Inject + detect ───────────────────────────────────────────────────────────
 
-/** Inject content.js into ALL frames of the tab. */
+/** Inject content.js into every frame of the tab. */
 async function injectAll(tabId) {
   try {
     await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['content.js'] });
@@ -50,12 +50,12 @@ async function injectAll(tabId) {
 }
 
 /**
- * Uses executeScript across all frames to find which one has a video.
- * Returns { hasVideo, frameId, absoluteRect }.
- * absoluteRect is the video's position in top-level window coordinates — needed
- * for the canvas crop when the video lives inside a sub-frame.
+ * Find which frame has a video element.
+ * Returns { hasVideo, frameId }.
+ * Prefers the top frame (frameId 0) if it has a video; otherwise picks the
+ * first sub-frame that has one.
  */
-async function detectVideoAcrossFrames(tabId) {
+async function detectVideoFrame(tabId) {
   let results;
   try {
     results = await chrome.scripting.executeScript({
@@ -69,113 +69,26 @@ async function detectVideoAcrossFrames(tabId) {
           return v;
         }
         const vids = collectVids(document);
-        if (!vids.length) return { hasVideo: false };
-
-        const playing = vids.filter(v => !v.paused && !v.ended && v.readyState >= 2);
-        const pool    = playing.length ? playing : vids;
-        const best    = pool.reduce((b, v) => {
-          try {
-            const r = v.getBoundingClientRect(), br = b.getBoundingClientRect();
-            return r.width * r.height > br.width * br.height ? v : b;
-          } catch { return b; }
-        });
-
-        // Use the player container (wraps video + subtitle overlays), not bare <video>
-        const videoRect = best.getBoundingClientRect();
-        const videoArea = videoRect.width * videoRect.height;
-        let cropEl = best;
-        let el = best.parentElement;
-        for (let d = 0; el && d < 8; d++, el = el.parentElement) {
-          try {
-            const pos = getComputedStyle(el).position;
-            if (pos !== 'relative' && pos !== 'absolute' && pos !== 'fixed' && pos !== 'sticky') continue;
-            const er = el.getBoundingClientRect();
-            if (er.width * er.height <= videoArea * 3 && er.width >= videoRect.width - 2) {
-              cropEl = el;
-              if (er.width * er.height > videoArea * 1.05) break;
-            }
-          } catch { break; }
-        }
-        const r = cropEl.getBoundingClientRect();
-        return {
-          hasVideo:   true,
-          isTopFrame: window.self === window.top,
-          frameUrl:   location.href,
-          rect:       { left: r.left, top: r.top, width: r.width, height: r.height },
-        };
+        return { hasVideo: vids.length > 0, isTop: window.self === window.top };
       },
     });
   } catch {
-    return { hasVideo: false };
+    return { hasVideo: false, frameId: 0 };
   }
 
   const withVideo = results.filter(r => r.result?.hasVideo);
-  if (!withVideo.length) return { hasVideo: false };
+  if (!withVideo.length) return { hasVideo: false, frameId: 0 };
 
-  // Prefer the top frame if it found one; otherwise use the first sub-frame
-  const preferred = withVideo.find(r => r.result?.isTopFrame) || withVideo[0];
-  const frameId   = preferred.frameId;
-  const isTop     = preferred.result.isTopFrame;
-
-  // For sub-frames: compute absolute rect = iframe element rect + video rect within iframe
-  let absoluteRect = null;
-  if (!isTop) {
-    try {
-      const iframeUrl  = preferred.result.frameUrl;
-      const [topResult] = await chrome.scripting.executeScript({
-        target: { tabId, frameIds: [0] },
-        func: (url) => {
-          for (const f of document.querySelectorAll('iframe')) {
-            try {
-              const resolved = new URL(f.src || '', location.href).href;
-              if (resolved === url || url.startsWith(resolved.replace(/\/$/, ''))) {
-                const r = f.getBoundingClientRect();
-                return { left: r.left, top: r.top, width: r.width, height: r.height };
-              }
-            } catch {}
-          }
-          // Fallback: first sizeable iframe on the page
-          for (const f of document.querySelectorAll('iframe')) {
-            const r = f.getBoundingClientRect();
-            if (r.width > 100 && r.height > 100) {
-              return { left: r.left, top: r.top, width: r.width, height: r.height };
-            }
-          }
-          return null;
-        },
-        args: [iframeUrl],
-      });
-
-      const iframeRect = topResult?.result;
-      const videoRect  = preferred.result.rect;
-      if (iframeRect && videoRect) {
-        absoluteRect = {
-          left:   iframeRect.left + videoRect.left,
-          top:    iframeRect.top  + videoRect.top,
-          width:  videoRect.width,
-          height: videoRect.height,
-        };
-      }
-    } catch { /* best-effort */ }
-  }
-
-  return { hasVideo: true, frameId, absoluteRect };
+  // Prefer top frame; fall back to first sub-frame
+  const chosen = withVideo.find(r => r.result?.isTop) || withVideo[0];
+  return { hasVideo: true, frameId: chosen.frameId ?? 0 };
 }
 
-/** Send a message to a specific frame. */
+/** Send a message to a specific frame and await its response. */
 function sendToFrame(tabId, frameId, payload) {
   return new Promise(resolve => {
     chrome.tabs.sendMessage(tabId, payload, { frameId }, resp => {
       resolve(chrome.runtime.lastError ? null : resp);
-    });
-  });
-}
-
-async function getTabStreamId(tabId) {
-  return new Promise((resolve, reject) => {
-    chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, id => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve(id);
     });
   });
 }
@@ -192,7 +105,7 @@ function showIdle(hasVideo) {
   setMsg(hasVideo ? '' : 'Navigate to a page with an HTML5 video player.');
 }
 
-function showRecording(fmt, mode) {
+function showRecording(fmt) {
   dot.className = 'dot rec';
   statusText.textContent = 'Recording\u2026';
   formatBadge.textContent = fmt; formatBadge.style.display = 'inline';
@@ -210,14 +123,14 @@ function showStreamUrl(urls) {
 }
 
 // ── Mode toggle ───────────────────────────────────────────────────────────────
-modeRow.addEventListener('click', (e) => {
+modeRow.addEventListener('click', e => {
   const pill = e.target.closest('.mode-pill');
   if (!pill) return;
   recordMode = pill.dataset.mode;
   modeRow.querySelectorAll('.mode-pill').forEach(p => p.classList.toggle('active', p === pill));
 });
 
-// ── Copy stream URL ───────────────────────────────────────────────────────────
+// ── Copy HLS URL ──────────────────────────────────────────────────────────────
 streamUrlEl.addEventListener('click', () => {
   const url = streamUrlEl.textContent;
   if (!url) return;
@@ -230,21 +143,20 @@ streamUrlEl.addEventListener('click', () => {
 
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
-  setMsg('Scanning all frames\u2026');
+  setMsg('Scanning\u2026');
   const tab = await getActiveTab();
   if (!tab?.id) { setMsg('Cannot access this tab.', 'err'); return; }
 
   await injectAll(tab.id);
 
-  const detection = await detectVideoAcrossFrames(tab.id);
-  videoFrameId = detection.frameId ?? 0;
+  const detection = await detectVideoFrame(tab.id);
+  videoFrameId = detection.frameId;
 
   if (detection.hasVideo) {
-    const status = await sendToFrame(tab.id, 0, { action: 'status' });
+    const status = await sendToFrame(tab.id, videoFrameId, { action: 'status' });
     showStreamUrl(status?.streamUrls);
     if (status?.isRecording) {
-      showRecording(status.mimeType?.includes('mp4') ? 'MP4' : 'WebM', 'tab-capture');
-      setMsg('Recording in progress\u2026');
+      showRecording(status.mimeType?.includes('mp4') ? 'MP4' : 'WebM');
     } else {
       showIdle(true);
     }
@@ -256,41 +168,27 @@ async function init() {
 // ── Start ─────────────────────────────────────────────────────────────────────
 btnStart.addEventListener('click', async () => {
   btnStart.disabled = true;
-  setMsg('Initialising\u2026');
+  setMsg('Starting\u2026');
 
   const tab = await getActiveTab();
   await injectAll(tab.id);
 
-  // Re-detect in case page content changed since popup opened
-  const detection = await detectVideoAcrossFrames(tab.id);
-  videoFrameId = detection.frameId ?? 0;
+  const detection = await detectVideoFrame(tab.id);
+  videoFrameId = detection.frameId;
 
   if (!detection.hasVideo) {
-    setMsg('No video found — try refreshing the page.', 'err');
+    setMsg('No video found \u2014 try refreshing the page.', 'err');
     btnStart.disabled = false;
     return;
   }
 
-  let streamId = null;
-  try {
-    streamId = await getTabStreamId(tab.id);
-  } catch {
-    setMsg('Tab capture unavailable — audio/subtitles may be limited.');
-  }
-
-  // Always send to top frame (frameId 0) — getUserMedia(chromeMediaSource:'tab')
-  // only works reliably from the top frame, not inside iframes.
-  // absoluteRect lets the top frame crop to the correct region even when the
-  // video lives in a cross-origin iframe it can't access directly.
-  const result = await sendToFrame(tab.id, 0, {
+  const result = await sendToFrame(tab.id, videoFrameId, {
     action:           'start',
-    streamId,
-    absoluteRect:     detection.absoluteRect || null,
     captureSubtitles: recordMode === 'subtitles',
   });
 
   if (result?.success) {
-    showRecording(result.isMP4 ? 'MP4' : 'WebM', result.mode);
+    showRecording(result.isMP4 ? 'MP4' : 'WebM');
   } else {
     setMsg(result?.error || 'Failed to start recording.', 'err');
     btnStart.disabled = false;
@@ -301,10 +199,8 @@ btnStart.addEventListener('click', async () => {
 btnStop.addEventListener('click', async () => {
   btnStop.disabled = true;
   setMsg('Saving\u2026');
-
   const tab    = await getActiveTab();
-  const result = await sendToFrame(tab.id, 0, { action: 'stop' });
-
+  const result = await sendToFrame(tab.id, videoFrameId, { action: 'stop' });
   if (result?.success) {
     showIdle(true);
     setMsg('Saved to Downloads folder.', 'ok');
@@ -314,19 +210,19 @@ btnStop.addEventListener('click', async () => {
   }
 });
 
-// ── Auto-stop notification from content script ────────────────────────────────
-chrome.runtime.onMessage.addListener((msg) => {
+// ── Auto-stop from content script ────────────────────────────────────────────
+chrome.runtime.onMessage.addListener(msg => {
   if (msg.event === 'recording-stopped') {
     showIdle(true);
     setMsg('Video ended \u2014 saved to Downloads.', 'ok');
   }
 });
 
-// Poll for HLS stream URLs while popup is open
+// Poll for HLS stream URLs every 2s
 setInterval(async () => {
   const tab = await getActiveTab();
   if (!tab?.id) return;
-  const status = await sendToFrame(tab.id, 0, { action: 'status' });
+  const status = await sendToFrame(tab.id, videoFrameId, { action: 'status' });
   if (status?.streamUrls?.length) showStreamUrl(status.streamUrls);
 }, 2000);
 
