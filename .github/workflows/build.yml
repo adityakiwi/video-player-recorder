@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: write   # needed to create GitHub Releases
+
 jobs:
   build:
     runs-on: ubuntu-latest
