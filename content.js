@@ -1,21 +1,23 @@
 /**
  * content.js — injected into every frame independently (allFrames: true).
  *
- * Each frame manages its own <video> elements.
- * Popup can trigger recording of a specific video by local index.
+ * Default: no auto-recording. User clicks ▶ Rec in popup, or enables the
+ * "Auto-record" checkbox which starts recording when any video plays.
  */
 
-let recorder       = null;
-let chunks         = [];
-let mimeType       = '';
-let recordingIndex = -1;   // local index of the video currently being recorded
+let recorder        = null;
+let chunks          = [];
+let mimeType        = '';
+let recordingIndex  = -1;
+let recordingStart  = 0;   // Date.now() when recording began
+let autoRecord      = false;
 
 window.__vrRecording      = false;
 window.__vrRecordingIndex = -1;
+window.__vrRecordingStart = 0;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// Only direct videos in THIS frame — each frame manages its own.
 const getVideos = () => Array.from(document.querySelectorAll('video'));
 
 function bestMime() {
@@ -35,25 +37,30 @@ function saveFile() {
   document.body.appendChild(a);
   a.click();
   setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 5000);
+
   chunks                    = [];
   recorder                  = null;
   recordingIndex            = -1;
+  recordingStart            = 0;
   window.__vrRecording      = false;
   window.__vrRecordingIndex = -1;
+  window.__vrRecordingStart = 0;
 }
 
 // ── Recording ─────────────────────────────────────────────────────────────────
 
 function startRecording(video) {
   if (recorder && recorder.state === 'recording') return;
-  if (!video.captureStream) return;
+  if (!video || !video.captureStream) return;
 
   try {
     mimeType                  = bestMime();
     chunks                    = [];
     recordingIndex            = getVideos().indexOf(video);
+    recordingStart            = Date.now();
     window.__vrRecording      = true;
     window.__vrRecordingIndex = recordingIndex;
+    window.__vrRecordingStart = recordingStart;
 
     const stream = video.captureStream();
     recorder = new MediaRecorder(stream, { mimeType });
@@ -67,8 +74,10 @@ function startRecording(video) {
     console.warn('[VR] Could not start recording:', e.message);
     recorder                  = null;
     recordingIndex            = -1;
+    recordingStart            = 0;
     window.__vrRecording      = false;
     window.__vrRecordingIndex = -1;
+    window.__vrRecordingStart = 0;
   }
 }
 
@@ -76,14 +85,15 @@ function stopRecording() {
   if (recorder && recorder.state === 'recording') recorder.stop();
 }
 
-// ── Auto-attach play listeners ────────────────────────────────────────────────
+// ── Auto-record (opt-in via popup checkbox) ───────────────────────────────────
 
 function attachListeners() {
   for (const v of getVideos()) {
     if (v.__vrAttached) continue;
     v.__vrAttached = true;
-    v.addEventListener('play', () => startRecording(v));
-    if (!v.paused && !v.ended && v.readyState >= 2) startRecording(v);
+    v.addEventListener('play', () => {
+      if (autoRecord) startRecording(v);
+    });
   }
 }
 
@@ -97,23 +107,33 @@ window.addEventListener('__vr_stop__', stopRecording);
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.action === 'status') {
+    const vids = getVideos();
     sendResponse({
-      videoCount:     getVideos().length,
+      videos: vids.map((v, i) => ({
+        localIndex: i,
+        duration:   isFinite(v.duration) ? Math.round(v.duration) : null,
+        paused:     v.paused,
+        ended:      v.ended,
+      })),
       isRecording:    recorder?.state === 'recording',
       recordingIndex,
+      recordingStart,
+      autoRecord,
     });
     return true;
   }
 
   if (msg.action === 'record-video') {
     const video = getVideos()[msg.localIndex];
-    if (!video) { sendResponse({ success: false, error: 'Video not found' }); return true; }
-
-    // Rewind and play, then record
+    if (!video) { sendResponse({ success: false }); return true; }
     video.currentTime = 0;
-    video.play()
-      .catch(() => {}) // if autoplay blocked, the play listener will still fire
-      .finally(() => startRecording(video));
+    video.play().catch(() => {}).finally(() => startRecording(video));
+    sendResponse({ success: true });
+    return true;
+  }
+
+  if (msg.action === 'set-auto') {
+    autoRecord = msg.enabled;
     sendResponse({ success: true });
     return true;
   }
