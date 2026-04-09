@@ -86,42 +86,26 @@ modeRow.addEventListener('click', e => {
   modeRow.querySelectorAll('.mode-pill').forEach(p => p.classList.toggle('active', p === pill));
 });
 
-// ── Per-video Auto Play ───────────────────────────────────────────────────────
-async function toggleAutoPlay(gi, btn) {
+// ── Per-video Record ──────────────────────────────────────────────────────────
+async function recordVideo(gi, btn) {
   const entry = videoEntries[gi];
   if (!entry) return;
 
-  const isOn = btn.classList.contains('active');
-  if (isOn) {
-    await sendToFrame(tabId, entry.frameId, { action: 'disable-auto' });
-    btn.textContent = '▶ Auto Play';
-    btn.classList.remove('active');
-    btn.closest('.video-row').classList.remove('auto-active');
-    setMsg('');
-  } else {
-    // Disable any existing modes
-    await sendToFrame(tabId, videoFrameId, { action: 'disable-auto' });
-    await sendToFrame(tabId, videoFrameId, { action: 'disable-auto-move' });
-    listEl.querySelectorAll('.btn-auto').forEach(b => {
-      b.textContent = '▶ Auto Play'; b.classList.remove('active');
-      b.closest('.video-row').classList.remove('auto-active');
-    });
-    btnMove.classList.remove('active');
-    btnMove.textContent = '⟳ Auto Move — Record all in sequence';
+  btn.disabled = true;
+  btn.textContent = '…';
 
-    const result = await sendToFrame(tabId, entry.frameId, {
-      action:           'enable-auto',
-      captureSubtitles: recordMode === 'subtitles',
-      videoIndex:       entry.localIndex,
-    });
-    if (result?.success) {
-      btn.textContent = '⏸ Auto Play ON';
-      btn.classList.add('active');
-      btn.closest('.video-row').classList.add('auto-active');
-      setMsg(`Watching Video ${gi + 1} — will record when it plays.`);
-    } else {
-      setMsg(result?.error || 'Could not enable.', 'err');
-    }
+  const result = await sendToFrame(tabId, entry.frameId, {
+    action:           'record-video',
+    localIndex:       entry.localIndex,
+    captureSubtitles: recordMode === 'subtitles',
+  });
+
+  if (result?.success) {
+    setMsg(`Recording Video ${gi + 1}…`);
+  } else {
+    btn.disabled = false;
+    btn.textContent = '▶ Record';
+    setMsg(result?.error || 'Could not start recording.', 'err');
   }
 }
 
@@ -157,10 +141,6 @@ btnStop.addEventListener('click', async () => {
   await sendToFrame(tabId, videoFrameId, { action: 'stop' });
   btnMove.classList.remove('active');
   btnMove.textContent = '⟳ Auto Move — Record all in sequence';
-  listEl.querySelectorAll('.btn-auto').forEach(b => {
-    b.textContent = '▶ Auto Play'; b.classList.remove('active');
-    b.closest('.video-row').classList.remove('auto-active');
-  });
 });
 
 // ── Runtime messages from content ─────────────────────────────────────────────
@@ -200,10 +180,10 @@ function render(entries, status) {
       <div class="video-row" data-gi="${e.globalIndex}">
         <div class="v-dot"></div>
         <span class="v-label">Video ${e.globalIndex + 1}</span>
-        <button class="btn-auto" data-gi="${e.globalIndex}">▶ Auto Play</button>
+        <button class="btn-auto" data-gi="${e.globalIndex}">▶ Record</button>
       </div>`).join('');
     listEl.querySelectorAll('.btn-auto').forEach(btn => {
-      btn.addEventListener('click', () => toggleAutoPlay(+btn.dataset.gi, btn));
+      btn.addEventListener('click', () => recordVideo(+btn.dataset.gi, btn));
     });
   }
 

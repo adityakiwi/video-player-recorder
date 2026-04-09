@@ -379,6 +379,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse(stopRecording(true)); // cancel auto modes too
       break;
 
+    case 'record-video': {
+      const video = collectVideos(document)[msg.localIndex];
+      if (!video) { sendResponse({ success: false, error: 'Video not found.' }); break; }
+      video.currentTime = 0;
+      video.play().catch(() => {}).finally(() =>
+        beginRecording(msg.captureSubtitles, video)
+          .then(sendResponse)
+          .catch(e => sendResponse({ success: false, error: e.message }))
+      );
+      return true;
+    }
+
     case 'enable-auto':
       sendResponse(enableAutoRecord(msg.captureSubtitles, msg.videoIndex ?? -1));
       break;
