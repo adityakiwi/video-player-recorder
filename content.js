@@ -14,32 +14,71 @@ function sanitize(name) {
   return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '').replace(/\s+/g, '_').slice(0, 120);
 }
 
-async function downloadVideo(video, title) {
-  // Scroll into view so the player initialises (lazy iframes)
+// Fully reset a video to the beginning, ready to capture from frame 0.
+// Returns only after the seek is confirmed (seeked event) so captureStream()
+// gets live frames instead of a stale/ended stream.
+async function resetToStart(video) {
   try { video.scrollIntoView({ behavior: 'instant', block: 'center' }); } catch {}
-  try { video.currentTime = 0; } catch {}
 
-  // Wait until the video has data
+  // Pause first so the player is in a stable state
+  try { video.pause(); } catch {}
+
+  // If the video errored or has no source loaded, force a full reload
+  if (video.error || video.networkState === HTMLMediaElement.NETWORK_NO_SOURCE || video.readyState === 0) {
+    video.load();
+  }
+
+  // Wait until there is enough data to seek
   if (video.readyState < 2) {
     await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('Video did not load in time.')), 15000);
-      const done = () => { clearTimeout(t); resolve(); };
-      video.addEventListener('canplay',    done, { once: true });
-      video.addEventListener('loadeddata', done, { once: true });
+      const t1 = setTimeout(() => {
+        video.load();   // force reload on first timeout
+        const t2 = setTimeout(() => reject(new Error('Video stuck — could not load.')), 20000);
+        video.addEventListener('canplay', () => { clearTimeout(t2); resolve(); }, { once: true });
+        video.addEventListener('error',   () => { clearTimeout(t2); reject(new Error('Video load error.')); }, { once: true });
+      }, 10000);
+      video.addEventListener('canplay', () => { clearTimeout(t1); resolve(); }, { once: true });
+      video.addEventListener('error',   () => { clearTimeout(t1); reject(new Error('Video load error.')); }, { once: true });
     });
   }
 
-  // Play it
-  try { await video.play(); } catch {}
-  await new Promise(r => setTimeout(r, 500));
+  // Seek to the very beginning and wait for the browser to confirm the seek.
+  // This is critical: after a video has been watched (ended state), seeking
+  // triggers the player to re-buffer from segment 0. We must wait for `seeked`
+  // before calling captureStream() or we'll get a dead video track.
+  await new Promise(resolve => {
+    const done = () => resolve();
+    video.addEventListener('seeked', done, { once: true });
+    try { video.currentTime = 0; }
+    catch { resolve(); }   // if seek throws, continue anyway
+    // Safety: if seeked never fires (already at 0), resolve after 1s
+    setTimeout(resolve, 1000);
+  });
+}
 
-  // Grab the stream
+async function downloadVideo(video, title) {
+  await resetToStart(video);
+
+  // captureStream() is called HERE — before play() — so the stream is attached
+  // while the video is at frame 0 and about to start. Calling it after play()
+  // on a previously-watched video risks getting only audio (video track stale).
   let stream;
   try { stream = video.captureStream(); } catch (e) {
     throw new Error('captureStream failed: ' + e.message);
   }
+
+  // Now start playback
+  try { await video.play(); } catch {}
+
+  // Wait for the first timeupdate — confirms frames are actually advancing
+  await new Promise(resolve => {
+    video.addEventListener('timeupdate', resolve, { once: true });
+    setTimeout(resolve, 2000);   // fallback: don't wait forever
+  });
+
+  // Verify we have tracks (retry once if stream was grabbed too early)
   if (!stream.getTracks().length) {
-    await new Promise(r => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, 600));
     try { stream = video.captureStream(); } catch {}
   }
   if (!stream.getTracks().length)
@@ -49,12 +88,13 @@ async function downloadVideo(video, title) {
     .find(t => { try { return MediaRecorder.isTypeSupported(t); } catch { return false; } })
     || 'video/webm';
 
-  chunks   = [];
+  chunks    = [];
   recStream = stream;
   recorder  = new MediaRecorder(stream, { mimeType });
   recorder.ondataavailable = e => { if (e.data?.size > 0) chunks.push(e.data); };
 
   recorder.onstop = () => {
+    clearInterval(stallTimer);
     const blob = new Blob(chunks, { type: mimeType });
     const ext  = mimeType.includes('mp4') ? 'mp4' : 'webm';
     const name = sanitize(title || document.title.split(/\s*[|\-–—]\s*/)[0] || 'video');
@@ -69,6 +109,26 @@ async function downloadVideo(video, title) {
   };
 
   recorder.start(1000);
+
+  // Stall detector: if currentTime stops advancing for 5s, nudge the video forward
+  let lastTime = video.currentTime;
+  let stallCount = 0;
+  const stallTimer = setInterval(() => {
+    if (recorder?.state !== 'recording') { clearInterval(stallTimer); return; }
+    if (!video.paused && !video.ended) {
+      if (video.currentTime === lastTime) {
+        stallCount++;
+        if (stallCount >= 2) {           // stuck for ~5 s
+          try { video.currentTime += 0.1; } catch {}   // nudge forward
+          stallCount = 0;
+        }
+      } else {
+        stallCount = 0;
+      }
+    }
+    lastTime = video.currentTime;
+  }, 2500);
+
   video.addEventListener('ended', () => {
     if (recorder?.state === 'recording') recorder.stop();
   }, { once: true });
