@@ -39,6 +39,7 @@ function sendToFrame(tid, fid, payload) {
 
 // ── Scan all frames for videos + extract titles from main-frame headings ───────
 async function scanVideos(tid) {
+  // Scan every frame: count videos and grab the frame's own URL for matching
   let results;
   try {
     results = await chrome.scripting.executeScript({
@@ -51,13 +52,15 @@ async function scanVideos(tid) {
           }
           return v;
         }
-        return { count: collectVids(document).length };
+        return { count: collectVids(document).length, href: location.href };
       },
     });
   } catch { return []; }
 
-  // Titles: only iframes that have a preceding <h2/h3/h1> (video iframes)
-  let iframeHeadings = [];
+  // From the main frame, collect each iframe's src + the heading before it.
+  // We extract a UUID-like ID from the src so we can match frames reliably
+  // regardless of the order Chrome assigns frameIds.
+  let iframeMap = [];   // [{ id, title }]  id = token from URL e.g. video UUID
   try {
     const [r] = await chrome.scripting.executeScript({
       target: { tabId: tid, frameIds: [0] },
@@ -76,28 +79,53 @@ async function scanVideos(tid) {
           }
           return '';
         }
+        // Extract a stable token from the iframe src (UUID or last path segment)
+        function srcId(src) {
+          try {
+            const m = src.match(/\/play\/([a-f0-9-]{8,})/i)   // UUID in /play/UUID
+                   || src.match(/custom_tool=.*?\/([a-f0-9-]{8,})/i)
+                   || src.match(/([a-f0-9-]{8,})/i);           // any long hex token
+            return m ? m[1] : src;
+          } catch { return src; }
+        }
         return Array.from(document.querySelectorAll('iframe'))
-          .map(headingBefore)
-          .filter(Boolean);
+          .map(f => ({ id: srcId(f.src), title: headingBefore(f) }))
+          .filter(x => x.title);   // only video iframes (those with a heading)
       },
     });
-    iframeHeadings = r?.result || [];
+    iframeMap = r?.result || [];
   } catch {}
 
-  const sorted = [...results].sort((a, b) => a.frameId - b.frameId);
-  const entries = [];
-  let gi = 0, bestCount = 0, iframeIdx = 0;
+  // Build a lookup: id → title
+  const titleById = {};
+  for (const { id, title } of iframeMap) titleById[id] = title;
 
-  for (const r of sorted) {
+  function titleForHref(href) {
+    if (!href) return '';
+    // Try to extract the same token from the frame's own URL
+    const m = href.match(/\/play\/([a-f0-9-]{8,})/i)
+           || href.match(/([a-f0-9-]{8,})/i);
+    const id = m ? m[1] : '';
+    return titleById[id] || '';
+  }
+
+  const entries = [];
+  let gi = 0, bestCount = 0;
+
+  // Non-main frames first (each is an iframe's content)
+  for (const r of results) {
     if (r.frameId === 0) continue;
     const count = r.result?.count || 0;
+    if (!count) continue;
     if (count > bestCount) { bestCount = count; videoFrameId = r.frameId; }
-    const title = iframeHeadings[iframeIdx++] || '';
+    const title = titleForHref(r.result?.href);
     for (let i = 0; i < count; i++) entries.push({ frameId: r.frameId, localIndex: i, globalIndex: gi++, title });
   }
-  for (const r of sorted) {
+  // Main frame videos (no iframe heading available)
+  for (const r of results) {
     if (r.frameId !== 0) continue;
     const count = r.result?.count || 0;
+    if (!count) continue;
     if (count > bestCount) { bestCount = count; videoFrameId = r.frameId; }
     for (let i = 0; i < count; i++) entries.push({ frameId: r.frameId, localIndex: i, globalIndex: gi++, title: '' });
   }

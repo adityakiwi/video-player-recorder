@@ -14,26 +14,50 @@ function sanitize(name) {
   return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '').replace(/\s+/g, '_').slice(0, 120);
 }
 
-async function downloadVideo(video, title) {
-  // Scroll into view so the player initialises (lazy iframes)
+// Fully reset a video to the beginning and wait until it can play
+async function resetAndLoad(video) {
   try { video.scrollIntoView({ behavior: 'instant', block: 'center' }); } catch {}
-  try { video.currentTime = 0; } catch {}
 
-  // Wait until the video has data
-  if (video.readyState < 2) {
+  // If the video errored or never loaded, force a full reload
+  if (video.error || video.networkState === video.NETWORK_NO_SOURCE) {
+    video.load();
+  } else {
+    // Try seeking to start; if it fails (e.g. not loaded yet), do a full reload
+    try { video.currentTime = 0; } catch { video.load(); }
+  }
+
+  // Stop any existing playback
+  try { video.pause(); } catch {}
+
+  // Wait for the video to have enough data to play
+  if (video.readyState < 3) {
     await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('Video did not load in time.')), 15000);
-      const done = () => { clearTimeout(t); resolve(); };
-      video.addEventListener('canplay',    done, { once: true });
-      video.addEventListener('loadeddata', done, { once: true });
+      const timeout = setTimeout(() => {
+        // First timeout: force reload and try again
+        video.load();
+        const timeout2 = setTimeout(() => reject(new Error('Video stuck — could not load.')), 20000);
+        video.addEventListener('canplay', () => { clearTimeout(timeout2); resolve(); }, { once: true });
+        video.addEventListener('error',   () => { clearTimeout(timeout2); reject(new Error('Video load error.')); }, { once: true });
+      }, 10000);
+      video.addEventListener('canplay', () => { clearTimeout(timeout); resolve(); }, { once: true });
+      video.addEventListener('error',   () => { clearTimeout(timeout); reject(new Error('Video load error.')); }, { once: true });
     });
   }
 
-  // Play it
+  // Make sure we're at the very beginning
+  try { video.currentTime = 0; } catch {}
+  await new Promise(r => setTimeout(r, 200));
+}
+
+async function downloadVideo(video, title) {
+  // Reset the video fully to the start before recording
+  await resetAndLoad(video);
+
+  // Start playback
   try { await video.play(); } catch {}
   await new Promise(r => setTimeout(r, 500));
 
-  // Grab the stream
+  // Capture the stream
   let stream;
   try { stream = video.captureStream(); } catch (e) {
     throw new Error('captureStream failed: ' + e.message);
@@ -49,12 +73,13 @@ async function downloadVideo(video, title) {
     .find(t => { try { return MediaRecorder.isTypeSupported(t); } catch { return false; } })
     || 'video/webm';
 
-  chunks   = [];
+  chunks    = [];
   recStream = stream;
   recorder  = new MediaRecorder(stream, { mimeType });
   recorder.ondataavailable = e => { if (e.data?.size > 0) chunks.push(e.data); };
 
   recorder.onstop = () => {
+    clearInterval(stallTimer);
     const blob = new Blob(chunks, { type: mimeType });
     const ext  = mimeType.includes('mp4') ? 'mp4' : 'webm';
     const name = sanitize(title || document.title.split(/\s*[|\-–—]\s*/)[0] || 'video');
@@ -69,6 +94,26 @@ async function downloadVideo(video, title) {
   };
 
   recorder.start(1000);
+
+  // Stall detector: if currentTime stops advancing for 5s, nudge the video forward
+  let lastTime = video.currentTime;
+  let stallCount = 0;
+  const stallTimer = setInterval(() => {
+    if (recorder?.state !== 'recording') { clearInterval(stallTimer); return; }
+    if (!video.paused && !video.ended) {
+      if (video.currentTime === lastTime) {
+        stallCount++;
+        if (stallCount >= 2) {           // stuck for ~5 s
+          try { video.currentTime += 0.1; } catch {}   // nudge forward
+          stallCount = 0;
+        }
+      } else {
+        stallCount = 0;
+      }
+    }
+    lastTime = video.currentTime;
+  }, 2500);
+
   video.addEventListener('ended', () => {
     if (recorder?.state === 'recording') recorder.stop();
   }, { once: true });

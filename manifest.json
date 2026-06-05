@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Video Player Recorder",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Download any HTML5 video — plays from start, saves with title as filename",
   "permissions": [
     "activeTab",
