@@ -14,56 +14,71 @@ function sanitize(name) {
   return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '').replace(/\s+/g, '_').slice(0, 120);
 }
 
-// Fully reset a video to the beginning and wait until it can play
-async function resetAndLoad(video) {
+// Fully reset a video to the beginning, ready to capture from frame 0.
+// Returns only after the seek is confirmed (seeked event) so captureStream()
+// gets live frames instead of a stale/ended stream.
+async function resetToStart(video) {
   try { video.scrollIntoView({ behavior: 'instant', block: 'center' }); } catch {}
 
-  // If the video errored or never loaded, force a full reload
-  if (video.error || video.networkState === video.NETWORK_NO_SOURCE) {
-    video.load();
-  } else {
-    // Try seeking to start; if it fails (e.g. not loaded yet), do a full reload
-    try { video.currentTime = 0; } catch { video.load(); }
-  }
-
-  // Stop any existing playback
+  // Pause first so the player is in a stable state
   try { video.pause(); } catch {}
 
-  // Wait for the video to have enough data to play
-  if (video.readyState < 3) {
+  // If the video errored or has no source loaded, force a full reload
+  if (video.error || video.networkState === HTMLMediaElement.NETWORK_NO_SOURCE || video.readyState === 0) {
+    video.load();
+  }
+
+  // Wait until there is enough data to seek
+  if (video.readyState < 2) {
     await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        // First timeout: force reload and try again
-        video.load();
-        const timeout2 = setTimeout(() => reject(new Error('Video stuck — could not load.')), 20000);
-        video.addEventListener('canplay', () => { clearTimeout(timeout2); resolve(); }, { once: true });
-        video.addEventListener('error',   () => { clearTimeout(timeout2); reject(new Error('Video load error.')); }, { once: true });
+      const t1 = setTimeout(() => {
+        video.load();   // force reload on first timeout
+        const t2 = setTimeout(() => reject(new Error('Video stuck — could not load.')), 20000);
+        video.addEventListener('canplay', () => { clearTimeout(t2); resolve(); }, { once: true });
+        video.addEventListener('error',   () => { clearTimeout(t2); reject(new Error('Video load error.')); }, { once: true });
       }, 10000);
-      video.addEventListener('canplay', () => { clearTimeout(timeout); resolve(); }, { once: true });
-      video.addEventListener('error',   () => { clearTimeout(timeout); reject(new Error('Video load error.')); }, { once: true });
+      video.addEventListener('canplay', () => { clearTimeout(t1); resolve(); }, { once: true });
+      video.addEventListener('error',   () => { clearTimeout(t1); reject(new Error('Video load error.')); }, { once: true });
     });
   }
 
-  // Make sure we're at the very beginning
-  try { video.currentTime = 0; } catch {}
-  await new Promise(r => setTimeout(r, 200));
+  // Seek to the very beginning and wait for the browser to confirm the seek.
+  // This is critical: after a video has been watched (ended state), seeking
+  // triggers the player to re-buffer from segment 0. We must wait for `seeked`
+  // before calling captureStream() or we'll get a dead video track.
+  await new Promise(resolve => {
+    const done = () => resolve();
+    video.addEventListener('seeked', done, { once: true });
+    try { video.currentTime = 0; }
+    catch { resolve(); }   // if seek throws, continue anyway
+    // Safety: if seeked never fires (already at 0), resolve after 1s
+    setTimeout(resolve, 1000);
+  });
 }
 
 async function downloadVideo(video, title) {
-  // Reset the video fully to the start before recording
-  await resetAndLoad(video);
+  await resetToStart(video);
 
-  // Start playback
-  try { await video.play(); } catch {}
-  await new Promise(r => setTimeout(r, 500));
-
-  // Capture the stream
+  // captureStream() is called HERE — before play() — so the stream is attached
+  // while the video is at frame 0 and about to start. Calling it after play()
+  // on a previously-watched video risks getting only audio (video track stale).
   let stream;
   try { stream = video.captureStream(); } catch (e) {
     throw new Error('captureStream failed: ' + e.message);
   }
+
+  // Now start playback
+  try { await video.play(); } catch {}
+
+  // Wait for the first timeupdate — confirms frames are actually advancing
+  await new Promise(resolve => {
+    video.addEventListener('timeupdate', resolve, { once: true });
+    setTimeout(resolve, 2000);   // fallback: don't wait forever
+  });
+
+  // Verify we have tracks (retry once if stream was grabbed too early)
   if (!stream.getTracks().length) {
-    await new Promise(r => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, 600));
     try { stream = video.captureStream(); } catch {}
   }
   if (!stream.getTracks().length)
