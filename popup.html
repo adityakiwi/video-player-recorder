@@ -25,17 +25,6 @@
 
     main { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
 
-    /* ── Mode pills ── */
-    .modes { display: flex; gap: 6px; }
-    .mode-pill {
-      flex: 1; padding: 7px 0; border-radius: 6px;
-      border: 1px solid #374151; background: #1f2937;
-      color: #9ca3af; font-size: 11px; font-weight: 600;
-      cursor: pointer; text-align: center; transition: all 0.15s;
-    }
-    .mode-pill.active { background: #1e3a5f; border-color: #3b82f6; color: #93c5fd; }
-    .mode-pill:hover:not(.active) { border-color: #4b5563; color: #d1d5db; }
-
     /* ── Status bar ── */
     .status-bar {
       display: flex; align-items: center; gap: 8px;
@@ -113,12 +102,6 @@
   </header>
 
   <main>
-    <!-- Mode pills -->
-    <div class="modes" id="modeRow">
-      <div class="mode-pill active" data-mode="video">▶ Video only</div>
-      <div class="mode-pill" data-mode="subtitles">📜 Video + Subtitles</div>
-    </div>
-
     <!-- Status -->
     <div class="status-bar">
       <div class="dot" id="dot"></div>

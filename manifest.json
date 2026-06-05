@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Video Player Recorder",
-  "version": "2.9.0",
-  "description": "Record any HTML5 video player with subtitles and audio, optimized for Emeritus",
+  "version": "3.0.0",
+  "description": "Download any HTML5 video — plays from start, saves with title as filename",
   "permissions": [
     "activeTab",
     "scripting",
